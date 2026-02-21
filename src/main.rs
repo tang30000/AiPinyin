@@ -341,13 +341,14 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         let ai_slots = std::cmp::min(state.cfg.ai.top_k, 3); // AI 占前3位
         let ai_cands = state.ai.predict(&raw, &state.history, ai_slots);
 
-        // 字典候选
+        // 字典候选 (经 AI 重排)
         let dict_cands = state.input.engine.get_candidates();
         let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
+        let dict_ranked = state.ai.rerank(&raw, dict_after, &state.history);
 
         // 合并: AI 在前, 字典补后 (去重)
         let mut merged = ai_cands;
-        for d in dict_after {
+        for d in dict_ranked {
             if !merged.contains(&d) {
                 merged.push(d);
             }
