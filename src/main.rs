@@ -163,14 +163,56 @@ unsafe extern "system" fn test_wnd_proc(
                 if demo.input.engine.is_empty() {
                     demo.cand_win.hide();
                 } else {
-                    // 查询拼音引擎获取候选词
                     let cands = demo.input.engine.get_candidates();
                     let refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
                     let count = min(9, refs.len());
-                    // 一站式更新：传入候选 → 自动定位到光标 → 显示
-                    demo.cand_win.update_candidates(&refs[..count]);
+
+                    demo.cand_win.draw_candidates(&refs[..count]);
+
+                    // 精确计算拼音末端的屏幕坐标
+                    // 1. 获取窗口客户区位置（屏幕坐标）
+                    let mut win_rc = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut win_rc);
+                    let mut client_origin = POINT { x: 0, y: 0 };
+                    let _ = ClientToScreen(hwnd, &mut client_origin);
+
+                    // 2. 测量已输入文字的像素宽度（复用 WM_PAINT 的尺寸逻辑）
+                    let hdc = GetDC(hwnd);
+                    let font = CreateFontW(
+                        20, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+                        DEFAULT_CHARSET.0 as u32, OUT_TT_PRECIS.0 as u32,
+                        CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32,
+                        DEFAULT_PITCH.0 as u32, w!("微软雅黑"),
+                    );
+                    let old = SelectObject(hdc, font);
+
+                    let mut text_x = 10i32; // 同 WM_PAINT 起始 x
+
+                    // 已提交文字的宽度
+                    if !demo.input.committed.is_empty() {
+                        let w: Vec<u16> = demo.input.committed.encode_utf16().collect();
+                        let mut sz = SIZE::default();
+                        let _ = GetTextExtentPoint32W(hdc, &w, &mut sz);
+                        text_x += sz.cx;
+                    }
+                    // 当前拼音缓冲的宽度
+                    let raw = demo.input.engine.raw_input().to_string();
+                    if !raw.is_empty() {
+                        let w: Vec<u16> = raw.encode_utf16().collect();
+                        let mut sz = SIZE::default();
+                        let _ = GetTextExtentPoint32W(hdc, &w, &mut sz);
+                        text_x += sz.cx;
+                    }
+
+                    SelectObject(hdc, old);
+                    let _ = DeleteObject(font);
+                    ReleaseDC(hwnd, hdc);
+
+                    // 3. 候选窗口显示位置 = 客户区原点 + 文字末端 x + 窗口高度下方
+                    let caret_x = client_origin.x + text_x;
+                    let caret_y = win_rc.bottom; // 测试窗口正下方
+                    demo.cand_win.show(caret_x, caret_y + 4);
                 }
-                // 重绘输入窗口
                 let _ = InvalidateRect(hwnd, None, TRUE);
             }
 
