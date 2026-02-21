@@ -29,8 +29,8 @@ const HL_BG: COLORREF = rgb(122, 162, 247);     // #7AA2F7 亮蓝高亮
 const HL_TEXT: COLORREF = rgb(255, 255, 255);   // #FFFFFF 高亮文字纯白
 
 // 排版参数
-const FONT_SZ: i32 = 24;          // 候选字体大小
-const IDX_FONT_SZ: i32 = 16;      // 序号字体大小
+const FONT_SZ: i32 = 20;          // 候选字体大小
+const IDX_FONT_SZ: i32 = 20;      // 序号字体大小（与候选字统一）
 const WIN_ALPHA: u8 = 240;         // 窗口透明度
 const PAD_H: i32 = 18;             // 水平内边距
 const PAD_V: i32 = 12;             // 垂直内边距
@@ -299,7 +299,7 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
         SelectObject(hdc, state.font_idx);
         SetTextColor(hdc, if is_sel { HL_TEXT } else { INDEX_CLR });
 
-        let idx_str = format!("{}.", i + 1);
+        let idx_str = format!("{}", i + 1);
         let idx_w: Vec<u16> = idx_str.encode_utf16().collect();
         let mut sz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &idx_w, &mut sz);
@@ -356,7 +356,7 @@ unsafe fn calc_size(hdc: HDC, state: &WindowState) -> (i32, i32) {
     for (i, cand) in state.candidates.iter().enumerate() {
         // 测量序号
         SelectObject(hdc, state.font_idx);
-        let idx_str = format!("{}.", i + 1);
+        let idx_str = format!("{}", i + 1);
         let idx_w: Vec<u16> = idx_str.encode_utf16().collect();
         let mut sz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &idx_w, &mut sz);
