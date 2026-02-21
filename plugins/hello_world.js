@@ -14,15 +14,15 @@
 
 /** 输入 'time' 返回当前时间 */
 var SHORTCUTS = {
-    'time': function() {
+    'time': function () {
         var d = new Date();
         return [pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds())];
     },
-    'date': function() {
+    'date': function () {
         var d = new Date();
         return [d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())];
     },
-    'week': function() {
+    'week': function () {
         var days = ['日', '一', '二', '三', '四', '五', '六'];
         return ['星期' + days[new Date().getDay()]];
     }
@@ -33,14 +33,12 @@ var SHORTCUTS = {
  * 返回 candidates 不变则走普通拼音流程
  */
 function on_candidates(raw, candidates) {
-    // 检查是否匹配内置快捷词
     if (SHORTCUTS[raw]) {
-        var result = SHORTCUTS[raw]();
-        console.log('快捷词 [' + raw + '] → ' + result[0]);
-        return result;
+        var extra = SHORTCUTS[raw]();
+        console.log('快捷词 [' + raw + '] → ' + extra[0]);
+        // 插入到最前，保留原始候选
+        return extra.concat(Array.prototype.slice.call(candidates));
     }
-
-    // 否则直接返回原始候选（不修改）
     return candidates;
 }
 

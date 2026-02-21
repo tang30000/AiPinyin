@@ -31,8 +31,17 @@ impl InputState {
 
 pub struct KeyResult {
     pub eaten: bool,
-    pub committed: Option<String>,
+    /// 需要上屏的动作
+    pub commit: Option<CommitAction>,
     pub need_refresh: bool,
+}
+
+/// 上屏动作
+pub enum CommitAction {
+    /// 上屏当前显示候选列表中的第 i 项（由调用方从缓存中取）
+    Index(usize),
+    /// 直接上屏指定文本（Enter 原始字母）
+    Text(String),
 }
 
 pub fn handle_key_down(state: &mut InputState, vkey: u32) -> KeyResult {
@@ -42,64 +51,56 @@ pub fn handle_key_down(state: &mut InputState, vkey: u32) -> KeyResult {
             let ch = (vkey as u8 + 32) as char;
             state.engine.push(ch);
             info!("[Key] '{}' → {:?}", ch, state.engine.syllables());
-            KeyResult { eaten: true, committed: None, need_refresh: true }
+            KeyResult { eaten: true, commit: None, need_refresh: true }
         }
         // Backspace
         0x08 => {
             if state.engine.is_empty() {
-                KeyResult { eaten: false, committed: None, need_refresh: false }
+                KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
                 state.engine.pop();
-                KeyResult { eaten: true, committed: None, need_refresh: true }
+                KeyResult { eaten: true, commit: None, need_refresh: true }
             }
         }
-        // Space → 选第一个
+        // Space → 选第一个（索引 0）
         0x20 => {
             if state.engine.is_empty() {
-                KeyResult { eaten: false, committed: None, need_refresh: false }
+                KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
-                let cands = state.engine.get_candidates();
-                let text = cands.first().cloned();
-                if let Some(ref t) = text { state.committed.push_str(t); }
                 state.engine.clear();
-                KeyResult { eaten: true, committed: text, need_refresh: true }
+                KeyResult { eaten: true, commit: Some(CommitAction::Index(0)), need_refresh: true }
             }
         }
-        // 1-9 → 选对应候选
+        // 1-9 → 选对应索引
         0x31..=0x39 => {
             if state.engine.is_empty() {
-                KeyResult { eaten: false, committed: None, need_refresh: false }
+                KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
                 let idx = (vkey - 0x31) as usize;
-                let cands = state.engine.get_candidates();
-                let text = cands.get(idx).cloned();
-                if let Some(ref t) = text {
-                    state.committed.push_str(t);
-                    state.engine.clear();
-                }
-                KeyResult { eaten: true, committed: text, need_refresh: true }
+                state.engine.clear();
+                KeyResult { eaten: true, commit: Some(CommitAction::Index(idx)), need_refresh: true }
             }
         }
         // Escape → 取消，不输出任何内容
         0x1B => {
             if state.engine.is_empty() {
-                KeyResult { eaten: false, committed: None, need_refresh: false }
+                KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
                 state.engine.clear();
-                KeyResult { eaten: true, committed: None, need_refresh: true }
+                KeyResult { eaten: true, commit: None, need_refresh: true }
             }
         }
         // Enter → 以原始字母形式上屏
         0x0D => {
             if state.engine.is_empty() {
-                KeyResult { eaten: false, committed: None, need_refresh: false }
+                KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
                 let raw = state.engine.raw_input().to_string();
                 state.engine.clear();
-                KeyResult { eaten: true, committed: Some(raw), need_refresh: true }
+                KeyResult { eaten: true, commit: Some(CommitAction::Text(raw)), need_refresh: true }
             }
         }
-        _ => KeyResult { eaten: false, committed: None, need_refresh: false },
+        _ => KeyResult { eaten: false, commit: None, need_refresh: false },
     }
 }
 

@@ -15,7 +15,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use crate::key_event::{InputState, handle_key_down};
+use crate::key_event::{InputState, CommitAction, handle_key_down};
 
 pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150445bcde);
 
@@ -26,7 +26,9 @@ pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150
 struct ImeState {
     input: InputState,
     cand_win: ui::CandidateWindow,
-    plugins: plugin_system::PluginSystem,  // JS 插件系统
+    plugins: plugin_system::PluginSystem,
+    /// 候选窗口当前显示的候选词（经过插件处理后）
+    current_candidates: Vec<String>,
     chinese_mode: bool,
     shift_down: bool,
     shift_modified: bool,
@@ -68,6 +70,7 @@ fn main() -> Result<()> {
         input: InputState::new(),
         cand_win,
         plugins,
+        current_candidates: Vec::new(),
         chinese_mode: true,
         shift_down: false,
         shift_modified: false,
@@ -138,9 +141,25 @@ unsafe extern "system" fn low_level_keyboard_hook(
             // 中文模式：正常处理
             let result = handle_key_down(&mut state.input, vkey);
 
-            if let Some(text) = result.committed {
-                state.cand_win.hide();
-                send_unicode_text(&text);
+            match result.commit {
+                Some(CommitAction::Index(idx)) => {
+                    // 从当前展示的候选词缓存取文本（包含插件加入的词）
+                    let text = state.current_candidates.get(idx).cloned()
+                        .unwrap_or_default();
+                    if !text.is_empty() {
+                        state.cand_win.hide();
+                        state.current_candidates.clear();
+                        eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
+                            unsafe { send_unicode_text(&text) });
+                    }
+                }
+                Some(CommitAction::Text(text)) => {
+                    state.cand_win.hide();
+                    state.current_candidates.clear();
+                    eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
+                        unsafe { send_unicode_text(&text) });
+                }
+                None => {}
             }
 
             if result.need_refresh {
@@ -187,11 +206,8 @@ unsafe fn toggle_mode(state: &mut ImeState) {
     }
 }
 
-/// 向当前焦点应用注入 Unicode 文本
-///
-/// 每个字符用 SendInput + KEYEVENTF_UNICODE 发送，
-/// 支持任意 Unicode（中文、符号等）。
-unsafe fn send_unicode_text(text: &str) {
+/// 向当前焦点应用注入 Unicode 文本，返回实际发送的事件数
+unsafe fn send_unicode_text(text: &str) -> u32 {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
     let inputs: Vec<INPUT> = text
@@ -227,10 +243,8 @@ unsafe fn send_unicode_text(text: &str) {
         })
         .collect();
 
-    if !inputs.is_empty() {
-        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text, sent);
-    }
+    if inputs.is_empty() { return 0; }
+    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32)
 }
 
 
@@ -254,6 +268,9 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     let processed = state.plugins.transform_candidates(&raw, cands);
     let proc_refs: Vec<&str> = processed.iter().map(|s| s.as_str()).collect();
     let final_count = min(9, proc_refs.len());
+
+    // 缓存当前显示的候选（供 Space/数字上屏用）
+    state.current_candidates = processed[..final_count].to_vec();
 
     state.cand_win.update_candidates(&raw, &proc_refs[..final_count]);
 
