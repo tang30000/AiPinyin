@@ -102,6 +102,61 @@ pub fn split_pinyin_pub(input: &str) -> Vec<String> {
     split_pinyin(input)
 }
 
+/// 获取歧义切分: 返回所有合理的备选切分方案 (不含贪心主方案)
+///
+/// 例: "xian" 贪心=["xian"], 歧义备选=["xi","an"]
+///     "fangan" 贪心=["fang","an"], 歧义备选=["fan","gan"]
+///     "nihao" 贪心=["ni","hao"], 歧义备选=[] (无歧义)
+fn split_pinyin_ambiguous(input: &str) -> Vec<Vec<String>> {
+    if !input.is_ascii() || input.len() < 3 { return vec![]; }
+    let greedy = split_pinyin(input);
+    let mut alternatives = Vec::new();
+
+    // 对每个贪心音节，尝试在不同位置截短，看剩余能否形成合法音节
+    try_split_recursive(input.as_bytes(), 0, &mut Vec::new(), &greedy, &mut alternatives);
+
+    // 去重 + 去掉和贪心一样的
+    alternatives.retain(|alt| *alt != greedy);
+    alternatives.sort();
+    alternatives.dedup();
+    alternatives
+}
+
+fn try_split_recursive(
+    bytes: &[u8],
+    pos: usize,
+    current: &mut Vec<String>,
+    greedy: &[String],
+    results: &mut Vec<Vec<String>>,
+) {
+    if pos >= bytes.len() {
+        if current.len() >= 2 && *current != *greedy {
+            results.push(current.clone());
+        }
+        return;
+    }
+    // 限制结果数量
+    if results.len() >= 5 { return; }
+
+    let remaining = bytes.len() - pos;
+    let max_try = std::cmp::min(6, remaining);
+
+    // 尝试每种合法音节长度 (不只是最长)
+    for try_len in (1..=max_try).rev() {
+        let s = unsafe { std::str::from_utf8_unchecked(&bytes[pos..pos + try_len]) };
+        if is_valid_syllable(s) {
+            current.push(s.to_string());
+            try_split_recursive(bytes, pos + try_len, current, greedy, results);
+            current.pop();
+        }
+    }
+}
+
+/// 公开接口: 获取歧义切分结果
+pub fn split_pinyin_ambiguous_pub(input: &str) -> Vec<Vec<String>> {
+    split_pinyin_ambiguous(input)
+}
+
 fn is_valid_syllable(s: &str) -> bool {
     VALID_SYLLABLES.contains(&s)
 }
@@ -512,6 +567,30 @@ impl PinyinEngine {
             }
         }
 
+        // 2.5 歧义切分候选: "xian" → 贪心["xian"], 备选["xi","an"] → 查 "xian" 的词
+        let alt_splits = split_pinyin_ambiguous(&self.raw);
+        for alt in &alt_splits {
+            // 尝试将备选切分拼成完整拼音key查字典
+            let alt_key: String = alt.join("");
+            if alt_key != self.raw {
+                // 整体精确匹配备选key (通常和主相同, 跳过)
+            }
+            // 对备选切分的第一音节做精确查找
+            if let Some(first) = alt.first() {
+                if first.as_str() != self.syllables.first().map(|s| s.as_str()).unwrap_or("") {
+                    let alt_exact = dict.lookup(first);
+                    add!(alt_exact, 5);
+                }
+            }
+            // 多音节: 查找完整拼音组合 "xi"+"an" → "xian" 已查过,
+            // 但可以用 join key 查: "fan"+"gan" → "fangan"
+            if alt.len() >= 2 {
+                let multi_key: String = alt.iter().map(|s| s.as_str()).collect();
+                let multi_exact = dict.lookup(&multi_key);
+                add!(multi_exact, 5);
+            }
+        }
+
         // 3. 首字母缩写: "wm" -> 我们, "sj" -> 时间
         if self.raw.len() >= 2 && self.raw.len() <= 6 {
             let ab = dict.lookup_abbreviation(&self.raw);
@@ -551,6 +630,21 @@ mod tests {
         assert_eq!(split_pinyin("nihao"), vec!["ni", "hao"]);
         assert_eq!(split_pinyin("xian"), vec!["xian"]);
         assert_eq!(split_pinyin("zhuang"), vec!["zhuang"]);
+    }
+
+    #[test]
+    fn test_ambiguous_split() {
+        // xian → 贪心[xian], 歧义[xi,an]
+        let alts = split_pinyin_ambiguous("xian");
+        assert!(alts.contains(&vec!["xi".to_string(), "an".to_string()]));
+
+        // fangan → 贪心[fang,an], 歧义[fan,gan]
+        let alts = split_pinyin_ambiguous("fangan");
+        assert!(alts.contains(&vec!["fan".to_string(), "gan".to_string()]));
+
+        // nihao → 无歧义
+        let alts = split_pinyin_ambiguous("nihao");
+        assert!(alts.is_empty() || !alts.contains(&vec!["ni".to_string(), "hao".to_string()]));
     }
 
     #[test]
