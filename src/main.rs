@@ -127,9 +127,11 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     let raw = state.input.engine.raw_input().to_string();
+    eprintln!("[IME] raw={:?}, cands={}", raw, refs.len());
     state.cand_win.update_candidates(&raw, &refs[..count]);
 
     let pt = get_caret_screen_pos();
+    eprintln!("[IME] show at ({}, {})", pt.x, pt.y + 4);
     state.cand_win.show(pt.x, pt.y + 4);
 }
 

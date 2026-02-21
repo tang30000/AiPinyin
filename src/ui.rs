@@ -115,7 +115,9 @@ impl CandidateWindow {
         let hwnd = unsafe {
             let hinstance = GetModuleHandleW(None)?;
             let hinstance_val: HINSTANCE = hinstance.into();
-            let ex_style = WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            // 不用 WS_EX_LAYERED：GDI 绘制与分层窗口不兼容
+            // 圆角效果由 SetWindowRgn 实现，不透明即可
+            let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
             let hwnd = CreateWindowExW(
                 ex_style,
@@ -128,7 +130,6 @@ impl CandidateWindow {
                 Some(state_ptr as *const c_void),
             )?;
 
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), WIN_ALPHA, LWA_ALPHA);
             hwnd
         };
 
@@ -169,13 +170,16 @@ impl CandidateWindow {
         }
     }
 
-    /// 在指定屏幕坐标显示
+    /// 在指定屏幕坐标显示并立即绘制
     pub fn show(&self, x: i32, y: i32) {
         unsafe {
+            // 先移动+显示
             let _ = SetWindowPos(
                 self.hwnd, HWND_TOPMOST, x, y, 0, 0,
                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
+            // 强制同步绘制（钩子回调中消息循环被挂起，必须主动驱动）
+            let _ = UpdateWindow(self.hwnd);
         }
     }
 
@@ -235,11 +239,15 @@ impl CandidateWindow {
         }
     }
 
-    // ── 内部：调整尺寸 + 重绘 ──
+    // ── 内部：调整尺寸 + 立即重绘 ──
     unsafe fn resize_and_redraw(&self, state: &WindowState) {
         let hdc = GetDC(self.hwnd);
         let (w, h) = calc_size(hdc, state);
         ReleaseDC(self.hwnd, hdc);
+
+        eprintln!("[UI] calc_size → ({}, {}), cands={}", w, h, state.candidates.len());
+
+        if w <= 0 || h <= 0 { return; }
 
         let _ = SetWindowPos(
             self.hwnd, None, 0, 0, w, h,
@@ -249,7 +257,11 @@ impl CandidateWindow {
         let rgn = CreateRoundRectRgn(0, 0, w, h, WIN_RADIUS, WIN_RADIUS);
         SetWindowRgn(self.hwnd, rgn, TRUE);
 
-        let _ = InvalidateRect(self.hwnd, None, TRUE);
+        // RedrawWindow 立即同步绘制，不依赖消息队列
+        let _ = RedrawWindow(
+            self.hwnd, None, None,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE,
+        );
     }
 }
 

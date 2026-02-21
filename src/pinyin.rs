@@ -138,14 +138,31 @@ impl PinyinEngine {
     /// 是否为空
     pub fn is_empty(&self) -> bool { self.raw.is_empty() }
 
-    /// 获取候选汉字（临时版：静态映射 + 常用字）
-    /// 后续将替换为 AI 向量推理
+    /// 获取候选汉字
+    ///
+    /// 优先匹配第一个完整音节；若不完整，则用前缀匹配最近的音节。
     pub fn get_candidates(&self) -> Vec<String> {
-        if self.syllables.is_empty() {
-            return vec![];
+        if self.raw.is_empty() { return vec![]; }
+
+        let first_syllable = self.syllables.first().map(|s| s.as_str()).unwrap_or(&self.raw);
+
+        // 1. 完整音节直接查表
+        let direct = lookup_candidates(first_syllable);
+        if !direct.is_empty() { return direct; }
+
+        // 2. 前缀匹配：找到所有以当前输入开头的音节，合并候选
+        let prefix = &self.raw[..self.raw.len().min(first_syllable.len())];
+        let mut result = Vec::new();
+        for syl in VALID_SYLLABLES {
+            if syl.starts_with(prefix) {
+                let cands = lookup_candidates(syl);
+                for c in cands {
+                    if !result.contains(&c) { result.push(c); }
+                    if result.len() >= 9 { return result; }
+                }
+            }
         }
-        // 用第一个音节查候选
-        lookup_candidates(&self.syllables[0])
+        result
     }
 }
 
