@@ -3,7 +3,7 @@
 
 [engine]
 # 候选词模式: "ai" = AI主导(字典兜底), "dict" = 字典主导(AI重排)
-mode = "ai"
+mode = "dict"
 
 [ai]
 # AI 候选占位数 (AI主导模式下, 前N位给AI, 剩余给字典)
