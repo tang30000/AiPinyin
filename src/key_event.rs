@@ -67,7 +67,7 @@ pub fn handle_key_down(state: &mut InputState, vkey: u32) -> KeyResult {
             if state.engine.is_empty() {
                 KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
-                state.engine.clear();
+                // 不在这里 clear，由 main.rs 根据选中词的字数决定消耗几个音节
                 KeyResult { eaten: true, commit: Some(CommitAction::Index(0)), need_refresh: true }
             }
         }
@@ -77,7 +77,7 @@ pub fn handle_key_down(state: &mut InputState, vkey: u32) -> KeyResult {
                 KeyResult { eaten: false, commit: None, need_refresh: false }
             } else {
                 let idx = (vkey - 0x31) as usize;
-                state.engine.clear();
+                // 不在这里 clear，由 main.rs 根据选中词的字数决定消耗几个音节
                 KeyResult { eaten: true, commit: Some(CommitAction::Index(idx)), need_refresh: true }
             }
         }

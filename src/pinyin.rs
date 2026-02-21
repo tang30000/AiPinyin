@@ -532,6 +532,28 @@ impl PinyinEngine {
         self.syllables.clear();
     }
 
+    /// 消耗前 n 个音节 (选字后只吃掉已用音节, 剩余保留)
+    ///
+    /// 例: raw="nengbuneng" syllables=["neng","bu","neng"]
+    ///     consume_syllables(1) → raw="buneng" syllables=["bu","neng"]
+    ///     consume_syllables(3) → raw="" syllables=[]
+    pub fn consume_syllables(&mut self, n: usize) {
+        if n == 0 { return; }
+        if n >= self.syllables.len() {
+            self.clear();
+            return;
+        }
+        // 计算前 n 个音节占了多少 raw 字符
+        let chars_to_consume: usize = self.syllables[..n]
+            .iter().map(|s| s.len()).sum();
+        if chars_to_consume >= self.raw.len() {
+            self.clear();
+        } else {
+            self.raw = self.raw[chars_to_consume..].to_string();
+            self.syllables = split_pinyin(&self.raw);
+        }
+    }
+
     pub fn raw_input(&self) -> &str { &self.raw }
     pub fn syllables(&self) -> &[String] { &self.syllables }
     pub fn is_empty(&self) -> bool { self.raw.is_empty() }

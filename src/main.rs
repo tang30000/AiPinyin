@@ -174,8 +174,6 @@ unsafe fn cb_process_key(vkey: u32) {
             let text = state.current_candidates.get(idx).cloned()
                 .unwrap_or_default();
             if !text.is_empty() {
-                state.cand_win.hide();
-                state.current_candidates.clear();
                 state.history.push(&text);  // 记录上屏历史
                 // 自学习：记录 (拼音 → 选词)
                 if !raw_before.is_empty() {
@@ -183,10 +181,28 @@ unsafe fn cb_process_key(vkey: u32) {
                 }
                 eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                     send_unicode_text(&text));
+
+                // 部分消耗: 根据选中词的字数消耗对应音节
+                let char_count = text.chars().count();
+                state.input.engine.consume_syllables(char_count);
+                state.current_candidates.clear();
+
+                if state.input.engine.is_empty() {
+                    // 全部消耗完 → 隐藏候选窗
+                    state.cand_win.hide();
+                } else {
+                    // 还有剩余音节 → 立即刷新候选
+                    eprintln!("[IME] 剩余: {:?} → {:?}",
+                        state.input.engine.raw_input(),
+                        state.input.engine.syllables());
+                    refresh_candidates(state);
+                    return;  // 已经 refresh 了, 不要重复
+                }
             }
         }
         Some(CommitAction::Text(text)) => {
             state.cand_win.hide();
+            state.input.engine.clear();
             state.current_candidates.clear();
             state.history.push(&text);  // 记录上屏历史
             eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
