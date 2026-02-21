@@ -202,9 +202,9 @@ impl AIPredictor {
         }
     }
 
-    /// 字典辅助: 候选重排 (用第一个拼音的 logits 给候选打分)
+    /// 字典辅助: 上下文感知重排
     pub fn rerank(
-        &mut self, pinyin: &str, candidates: Vec<String>, _context: &HistoryBuffer,
+        &mut self, pinyin: &str, candidates: Vec<String>, context: &HistoryBuffer,
     ) -> Vec<String> {
         let session = match &mut self.state {
             AIState::Ready(s) => s, _ => return candidates,
@@ -212,7 +212,8 @@ impl AIPredictor {
         let vocab = match &self.vocab {
             Some(v) => v, None => return candidates,
         };
-        match run_rerank(session, vocab, pinyin, &candidates) {
+        let ctx_str = context.context_string();
+        match run_rerank(session, vocab, pinyin, &candidates, &ctx_str) {
             Ok(r) => r,
             Err(e) => { eprintln!("[AI] rerank: {}", e); candidates }
         }
@@ -367,18 +368,24 @@ fn get_top_k_constrained(
     }
 }
 
-/// 重排: 字典权重 + AI 混合评分
+/// 上下文感知重排
 ///
-/// 根因: PinyinGPT 无上下文时 logits 偏向笔画简单的字 (皮>疲, 文>问),
-/// 不等于词频. 纯 AI 排序会把"疲惫"排到"皮被"后面.
+/// 实验验证 (test_rerank.py):
+///   无上下文: wenti → 文体=7.1 > 问题=5.2  (AI 排错)
+///   上下文"我想问你一个": wenti → 问题=8.0 > 文体=6.9  (AI 排对!)
 ///
-/// 策略: 字典位序分 (反映词频) 作为主分, AI 分数作为微调.
-///   final_score = dict_position_score + ai_weight * normalized_ai_score
+/// 策略:
+///   输入序列: [CLS] ctx_char1 ctx_char2 ... [py1] → logits
+///   AI 权重随上下文长度增长:
+///     0 字上下文 → AI 占 15% (字典主导)
+///     2 字上下文 → AI 占 35%
+///     4+字上下文 → AI 占 70% (AI 主导)
 fn run_rerank(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
     pinyin: &str,
     candidates: &[String],
+    context: &str,
 ) -> Result<Vec<String>, String> {
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
     if syllables.is_empty() || candidates.is_empty() {
@@ -388,58 +395,92 @@ fn run_rerank(
     let vocab_size = 21571usize;
     let n = candidates.len();
 
-    // === 第一步: 获取 AI 分数 ===
-    // 只做首字评分 (快速, 够用), 避免每个候选多次推理
+    // === 构建上下文 input_ids ===
+    // [CLS] ctx_char1 ctx_char2 ... [py1]
+    let mut input_ids = vec![vocab.cls_id];
+
+    // 添加上下文字符 (最近 N 个, 避免超出模型最大长度)
+    let ctx_chars: Vec<char> = context.chars().rev().take(50).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    let ctx_len = ctx_chars.len();
+
+    for ch in &ctx_chars {
+        let ch_str = ch.to_string();
+        if let Some(&cid) = vocab.char2id.get(&ch_str) {
+            input_ids.push(cid);
+        }
+        // 跳过不在词表里的字符
+    }
+
+    // 添加第一个拼音 token
     let py1_id = match vocab.pinyin2id.get(syllables[0].as_str()) {
         Some(&id) => id,
         None => return Ok(candidates.to_vec()),
     };
+    input_ids.push(py1_id);
 
-    // 单次推理: [CLS] [py1] → 得到所有候选首字的分数
-    let input_ids = vec![vocab.cls_id, py1_id];
+    // 单次推理
     let logits = run_inference(session, &input_ids)?;
-    let offset = 1 * vocab_size; // 位置 1 的 logits
+    let last_pos = input_ids.len() - 1;
+    let offset = last_pos * vocab_size;
 
+    // 提取每个候选首字的 AI 分数
     let ai_scores: Vec<f32> = candidates.iter().map(|cand| {
         cand.chars().next()
             .and_then(|ch| vocab.char2id.get(&ch.to_string()))
-            .and_then(|&cid| logits.get(offset + cid as usize))
-            .copied()
+            .and_then(|&cid| {
+                let pos = offset + cid as usize;
+                if pos < logits.len() { Some(logits[pos]) } else { None }
+            })
             .unwrap_or(-50.0)
     }).collect();
 
-    // === 第二步: 混合评分 ===
-    // 字典位序分: 第1名=100, 第2名=90, 第3名=80, ...
-    // AI 归一化分: (ai_score - min) / (max - min) * 30
-    // 词长加分: 字数匹配音节数 +20, 多字词组 +10
+    // === 动态 AI 权重 ===
+    // 上下文越长 → AI 越可信 → AI 权重越高
+    let ai_weight = if ctx_len == 0 {
+        15.0   // 无上下文: AI 基本不干预
+    } else if ctx_len <= 2 {
+        35.0   // 短上下文: AI 适度参与
+    } else if ctx_len <= 4 {
+        55.0   // 中上下文: AI 与字典各半
+    } else {
+        70.0   // 长上下文: AI 主导
+    };
+    let dict_weight = 100.0 - ai_weight;
 
+    if ctx_len > 0 {
+        eprintln!("[AI] rerank: ctx={}字 '...{}', ai_weight={:.0}%",
+            ctx_len, &context[context.len().saturating_sub(12)..], ai_weight);
+    }
+
+    // === 混合评分 ===
     let ai_min = ai_scores.iter().cloned().fold(f32::INFINITY, f32::min);
     let ai_max = ai_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let ai_range = (ai_max - ai_min).max(1.0);
+    let ai_range = (ai_max - ai_min).max(0.1);
 
     let mut scored: Vec<(usize, f32)> = Vec::with_capacity(n);
 
     for (idx, cand) in candidates.iter().enumerate() {
         let char_count = cand.chars().count();
 
-        // 字典位序分 (越靠前越高, 平滑递减)
-        let dict_score = 100.0 - (idx as f32) * (80.0 / n.max(1) as f32);
+        // 字典位序分 (归一化到 0~100)
+        let dict_norm = 100.0 - (idx as f32) * (100.0 / n.max(1) as f32);
 
-        // AI 归一化分 (0~30)
-        let ai_norm = (ai_scores[idx] - ai_min) / ai_range * 30.0;
+        // AI 归一化分 (0~100)
+        let ai_norm = (ai_scores[idx] - ai_min) / ai_range * 100.0;
 
-        // 词长匹配加分: 字数 == 音节数的词组大幅加分
+        // 词长匹配加分
         let len_bonus = if char_count == syllables.len() && char_count >= 2 {
-            25.0  // 完整词组匹配 (如"疲惫"匹配"pi bei")
+            20.0  // 完整词组匹配
         } else if char_count == syllables.len() {
-            10.0  // 单字精确匹配
-        } else if char_count > syllables.len() {
-            5.0   // 候选更长 (如"疲惫不堪")
+            5.0
         } else {
-            0.0   // 候选太短
+            0.0
         };
 
-        let final_score = dict_score + ai_norm + len_bonus;
+        let final_score = dict_norm * dict_weight / 100.0
+                        + ai_norm * ai_weight / 100.0
+                        + len_bonus;
         scored.push((idx, final_score));
     }
 
