@@ -1,0 +1,41 @@
+[package]
+name = "aipinyin"
+version = "0.1.0"
+edition = "2021"
+description = "🇨🇳 爱拼音 - AI驱动的轻量级本地拼音输入法"
+license = "MIT"
+repository = "https://github.com/tang30000/AiPinyin"
+authors = ["tang30000"]
+
+[dependencies]
+# Windows API 绑定 - TSF 输入法框架 & 系统接口
+windows = { version = "0.58", features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_TextServices",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }
+
+# ONNX 推理引擎 - 加载本地 AI 权重 (暂时注释，等核心框架稳定后再集成)
+# ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
+
+# 序列化框架 - 配置 & 模型元数据
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+# 错误处理
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"     # 最小体积优化
+lto = true          # 链接时优化
+strip = true        # 移除调试符号
+codegen-units = 1   # 单代码生成单元，最大优化

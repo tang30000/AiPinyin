@@ -1,0 +1,4 @@
+# Cargo 配置
+# 如果需要 GNU linker，取消下面的注释
+# [target.x86_64-pc-windows-gnu]
+# linker = "D:\\msys64\\mingw64\\bin\\gcc.exe"
