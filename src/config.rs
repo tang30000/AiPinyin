@@ -47,13 +47,16 @@ impl Default for EngineConfig {
 pub struct AiConfig {
     #[serde(default = "default_top_k")]
     pub top_k: usize,
+    /// AI 是否参与字典候选排序
+    #[serde(default)]
+    pub rerank: bool,
 }
 
 fn default_top_k() -> usize { 9 }
 
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { top_k: default_top_k() }
+        Self { top_k: default_top_k(), rerank: false }
     }
 }
 
@@ -97,8 +100,8 @@ impl Config {
                 match toml::from_str::<Config>(&text) {
                     Ok(cfg) => {
                         eprintln!("[Config] ✅ 已加载 {:?}", config_path);
-                        eprintln!("[Config]   mode={:?}, top_k={}, font={}",
-                            cfg.engine.mode, cfg.ai.top_k, cfg.ui.font_size);
+                        eprintln!("[Config]   mode={:?}, top_k={}, rerank={}, font={}",
+                            cfg.engine.mode, cfg.ai.top_k, cfg.ai.rerank, cfg.ui.font_size);
                         cfg
                     }
                     Err(e) => {

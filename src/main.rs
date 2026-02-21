@@ -341,10 +341,14 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         let ai_slots = std::cmp::min(state.cfg.ai.top_k, 3); // AI 占前3位
         let ai_cands = state.ai.predict(&raw, &state.history, ai_slots);
 
-        // 字典候选 (经 AI 重排)
+        // 字典候选 (是否 AI 重排取决于配置)
         let dict_cands = state.input.engine.get_candidates();
         let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
-        let dict_ranked = state.ai.rerank(&raw, dict_after, &state.history);
+        let dict_ranked = if state.cfg.ai.rerank {
+            state.ai.rerank(&raw, dict_after, &state.history)
+        } else {
+            dict_after
+        };
 
         // 合并: AI 在前, 字典补后 (去重)
         let mut merged = ai_cands;
@@ -357,10 +361,13 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         merged
     } else {
         // === 字典主导模式 ===
-        // 字典 → 插件 → AI 重排
         let cands = state.input.engine.get_candidates();
         let after_plugins = state.plugins.transform_candidates(&raw, cands);
-        state.ai.rerank(&raw, after_plugins, &state.history)
+        if state.cfg.ai.rerank && state.ai.is_available() {
+            state.ai.rerank(&raw, after_plugins, &state.history)
+        } else {
+            after_plugins
+        }
     };
 
     let count = std::cmp::min(9, final_cands.len());
