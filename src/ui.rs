@@ -61,7 +61,7 @@ impl Default for Theme {
             hl_bg:      rgb(122, 162, 247),  // #7AA2F7
             hl_text:    rgb(255, 255, 255),  // #FFFFFF
             font_sz:    20,
-            pinyin_sz:  13,
+            pinyin_sz:  18,
             win_radius: 14,
             pad_h:      14,
         }
@@ -304,15 +304,31 @@ impl CandidateWindow {
         self.hwnd
     }
 
-    /// 在指定屏幕坐标显示并立即绘制
+    /// 在指定屏幕坐标显示并立即绘制（自动防止超出屏幕）
     pub fn show(&self, x: i32, y: i32) {
         unsafe {
-            // 先移动+显示
+            // 获取窗口尺寸
+            let mut wnd_rc = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut wnd_rc);
+            let wnd_w = wnd_rc.right - wnd_rc.left;
+            let wnd_h = wnd_rc.bottom - wnd_rc.top;
+
+            // 获取屏幕尺寸
+            let scr_w = GetSystemMetrics(SM_CXSCREEN);
+            let scr_h = GetSystemMetrics(SM_CYSCREEN);
+
+            // 边界钳位: 不超出屏幕
+            let mut fx = x;
+            let mut fy = y;
+            if fx + wnd_w > scr_w { fx = scr_w - wnd_w; }
+            if fy + wnd_h > scr_h { fy = y - wnd_h - 28; } // 超出底部→显示在光标上方
+            if fx < 0 { fx = 0; }
+            if fy < 0 { fy = 0; }
+
             let _ = SetWindowPos(
-                self.hwnd, HWND_TOPMOST, x, y, 0, 0,
+                self.hwnd, HWND_TOPMOST, fx, fy, 0, 0,
                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
-            // 强制同步绘制（钩子回调中消息循环被挂起，必须主动驱动）
             let _ = UpdateWindow(self.hwnd);
         }
     }

@@ -1,6 +1,6 @@
 {
   "pinyin_vocab_size": 432,
-  "char_vocab_size": 138,
+  "char_vocab_size": 6370,
   "d_model": 256,
   "nhead": 4,
   "num_layers": 6,

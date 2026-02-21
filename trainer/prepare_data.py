@@ -125,13 +125,16 @@ def process_csv(csv_path: str, out_path: str, max_samples: int = 0):
 
 
 if __name__ == '__main__':
+    import sys
     data_dir = os.path.join(os.path.dirname(__file__), 'data')
     csv_path = os.path.join(data_dir, 'pinyin2hanzi.csv')
     out_path = os.path.join(data_dir, 'corpus.txt')
+
+    max_samples = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 
     if not os.path.exists(csv_path):
         print(f"❌ 找不到 {csv_path}")
         print(f"请先运行: python trainer/download_dataset.py")
         exit(1)
 
-    process_csv(csv_path, out_path)
+    process_csv(csv_path, out_path, max_samples=max_samples)
