@@ -83,6 +83,10 @@ def process_csv(csv_path: str, out_path: str, max_samples: int = 0):
                 continue
 
             samples.append(f"{pinyin_toneless}\t{pure_hanzi}")
+            # 首字母版本 (简拼): "ni hao" → "n h"
+            initials = ' '.join(s[0] for s in syllables)
+            if initials != pinyin_toneless:  # 避免单字母重复
+                samples.append(f"{initials}\t{pure_hanzi}")
             valid += 1
 
             if valid % 200000 == 0:

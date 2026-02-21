@@ -94,6 +94,9 @@ PINYIN_SYLLABLES = [
     "wa", "wo", "wu", "wai", "wei", "wan", "wen", "wang", "weng",
 ]
 
+# 首字母 (支持简拼输入, 如 "n h" → "你好")
+PINYIN_INITIALS = list("abcdefghijklmnopqrstuvwxyz")
+
 # 特殊 Token
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
@@ -120,10 +123,19 @@ class PinyinTokenizer:
             self.syl2id[tok] = i
             self.id2syl[i] = tok
         offset = len(SPECIAL_TOKENS)
-        for i, syl in enumerate(PINYIN_SYLLABLES):
-            idx = offset + i
-            self.syl2id[syl] = idx
-            self.id2syl[idx] = syl
+        idx = 0
+        # 先加单字母 (首字母简拼)
+        for letter in PINYIN_INITIALS:
+            if letter not in self.syl2id:
+                self.syl2id[letter] = offset + idx
+                self.id2syl[offset + idx] = letter
+                idx += 1
+        # 再加完整音节
+        for syl in PINYIN_SYLLABLES:
+            if syl not in self.syl2id:
+                self.syl2id[syl] = offset + idx
+                self.id2syl[offset + idx] = syl
+                idx += 1
 
     @property
     def vocab_size(self) -> int:
