@@ -367,7 +367,13 @@ fn get_top_k_constrained(
     }
 }
 
-/// 重排
+/// 重排: 字典权重 + AI 混合评分
+///
+/// 根因: PinyinGPT 无上下文时 logits 偏向笔画简单的字 (皮>疲, 文>问),
+/// 不等于词频. 纯 AI 排序会把"疲惫"排到"皮被"后面.
+///
+/// 策略: 字典位序分 (反映词频) 作为主分, AI 分数作为微调.
+///   final_score = dict_position_score + ai_weight * normalized_ai_score
 fn run_rerank(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
@@ -375,35 +381,70 @@ fn run_rerank(
     candidates: &[String],
 ) -> Result<Vec<String>, String> {
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
-    if syllables.is_empty() { return Ok(candidates.to_vec()); }
+    if syllables.is_empty() || candidates.is_empty() {
+        return Ok(candidates.to_vec());
+    }
 
-    let py1 = &syllables[0];
-    let py1_id = match vocab.pinyin2id.get(py1.as_str()) {
+    let vocab_size = 21571usize;
+    let n = candidates.len();
+
+    // === 第一步: 获取 AI 分数 ===
+    // 只做首字评分 (快速, 够用), 避免每个候选多次推理
+    let py1_id = match vocab.pinyin2id.get(syllables[0].as_str()) {
         Some(&id) => id,
         None => return Ok(candidates.to_vec()),
     };
 
+    // 单次推理: [CLS] [py1] → 得到所有候选首字的分数
     let input_ids = vec![vocab.cls_id, py1_id];
     let logits = run_inference(session, &input_ids)?;
+    let offset = 1 * vocab_size; // 位置 1 的 logits
 
-    let vocab_size = 21571usize;
-    let last_pos = input_ids.len() - 1;
-    let offset = last_pos * vocab_size;
-    let last_logits = &logits[offset..offset.saturating_add(vocab_size).min(logits.len())];
-
-    let scores: Vec<f32> = candidates.iter().map(|cand| {
-        if let Some(first_char) = cand.chars().next() {
-            if let Some(&char_id) = vocab.char2id.get(&first_char.to_string()) {
-                let idx = char_id as usize;
-                if idx < last_logits.len() { return last_logits[idx]; }
-            }
-        }
-        f32::NEG_INFINITY
+    let ai_scores: Vec<f32> = candidates.iter().map(|cand| {
+        cand.chars().next()
+            .and_then(|ch| vocab.char2id.get(&ch.to_string()))
+            .and_then(|&cid| logits.get(offset + cid as usize))
+            .copied()
+            .unwrap_or(-50.0)
     }).collect();
 
-    let mut indexed: Vec<(usize, f32)> = scores.into_iter().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(indexed.into_iter()
+    // === 第二步: 混合评分 ===
+    // 字典位序分: 第1名=100, 第2名=90, 第3名=80, ...
+    // AI 归一化分: (ai_score - min) / (max - min) * 30
+    // 词长加分: 字数匹配音节数 +20, 多字词组 +10
+
+    let ai_min = ai_scores.iter().cloned().fold(f32::INFINITY, f32::min);
+    let ai_max = ai_scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let ai_range = (ai_max - ai_min).max(1.0);
+
+    let mut scored: Vec<(usize, f32)> = Vec::with_capacity(n);
+
+    for (idx, cand) in candidates.iter().enumerate() {
+        let char_count = cand.chars().count();
+
+        // 字典位序分 (越靠前越高, 平滑递减)
+        let dict_score = 100.0 - (idx as f32) * (80.0 / n.max(1) as f32);
+
+        // AI 归一化分 (0~30)
+        let ai_norm = (ai_scores[idx] - ai_min) / ai_range * 30.0;
+
+        // 词长匹配加分: 字数 == 音节数的词组大幅加分
+        let len_bonus = if char_count == syllables.len() && char_count >= 2 {
+            25.0  // 完整词组匹配 (如"疲惫"匹配"pi bei")
+        } else if char_count == syllables.len() {
+            10.0  // 单字精确匹配
+        } else if char_count > syllables.len() {
+            5.0   // 候选更长 (如"疲惫不堪")
+        } else {
+            0.0   // 候选太短
+        };
+
+        let final_score = dict_score + ai_norm + len_bonus;
+        scored.push((idx, final_score));
+    }
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored.into_iter()
         .filter_map(|(i, _)| candidates.get(i).cloned())
         .collect())
 }
