@@ -161,22 +161,14 @@ unsafe extern "system" fn test_wnd_proc(
 
             if result.need_refresh {
                 if demo.input.engine.is_empty() {
-                    // 无输入 → 隐藏候选窗口
                     demo.cand_win.hide();
                 } else {
-                    // 有输入 → 更新并显示候选窗口
+                    // 查询拼音引擎获取候选词
                     let cands = demo.input.engine.get_candidates();
                     let refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
                     let count = min(9, refs.len());
-                    if count > 0 {
-                        demo.cand_win.draw_candidates(&refs[..count]);
-                        // 候选窗口定位在输入窗口正下方
-                        let mut rc = RECT::default();
-                        let _ = GetWindowRect(hwnd, &mut rc);
-                        demo.cand_win.show(rc.left, rc.bottom + 2);
-                    } else {
-                        demo.cand_win.hide();
-                    }
+                    // 一站式更新：传入候选 → 自动定位到光标 → 显示
+                    demo.cand_win.update_candidates(&refs[..count]);
                 }
                 // 重绘输入窗口
                 let _ = InvalidateRect(hwnd, None, TRUE);

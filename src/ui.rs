@@ -187,6 +187,49 @@ impl CandidateWindow {
             }
         }
     }
+
+    /// 更新候选词 + 自动定位到光标下方并显示
+    ///
+    /// 一站式 API：传入候选列表，自动计算尺寸、定位到光标、显示窗口。
+    /// 如果候选列表为空，自动隐藏窗口。
+    pub fn update_candidates(&self, candidates: &[&str]) {
+        if candidates.is_empty() {
+            self.hide();
+            return;
+        }
+        self.draw_candidates(candidates);
+        self.show_at_caret();
+    }
+
+    /// 根据系统光标位置（Caret）显示候选窗口
+    ///
+    /// 自动获取当前焦点窗口的文本光标位置，在其下方弹出。
+    /// 如果获取不到光标位置（某些应用不支持），回退到鼠标位置。
+    ///
+    /// 未来集成 TSF 时，将改用 ITfContextView::GetTextExt 获取更精确的位置。
+    pub fn show_at_caret(&self) {
+        unsafe {
+            let mut pt = POINT::default();
+            let mut got_pos = false;
+
+            // 方案1：通过 GetCaretPos 获取文本光标位置
+            if GetCaretPos(&mut pt).is_ok() {
+                let fg = GetForegroundWindow();
+                if !fg.is_invalid() {
+                    let _ = ClientToScreen(fg, &mut pt);
+                    got_pos = true;
+                }
+            }
+
+            // 方案2：回退到鼠标位置
+            if !got_pos {
+                let _ = GetCursorPos(&mut pt);
+            }
+
+            // 在光标下方偏移显示，避免遮挡文字
+            self.show(pt.x, pt.y + 28);
+        }
+    }
 }
 
 impl Drop for CandidateWindow {

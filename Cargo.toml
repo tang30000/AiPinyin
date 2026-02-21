@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 license-file = "LICENSE"
 description = "🇨🇳 爱拼音 - AI驱动的轻量级本地拼音输入法"
-license = "LicenseRef-NonCommercial"
 repository = "https://github.com/tang30000/AiPinyin"
 authors = ["tang30000"]
 
