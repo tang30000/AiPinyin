@@ -1,0 +1,28 @@
+/* AiPinyin 候选词窗口样式表
+ *
+ * 修改此文件即可自定义外观，无需重新编译。
+ * 重启 AiPinyin 后生效。
+ *
+ * 颜色格式：#RRGGBB（6位十六进制）
+ * 尺寸格式：数字 + px（如 20px）
+ */
+
+:root {
+    /* ── 背景与文字 ── */
+    --bg-color:        #2E313E;   /* 窗口背景色（深灰蓝）  */
+    --text-color:      #C8CCD8;   /* 候选汉字颜色           */
+    --pinyin-color:    #6E738C;   /* 上排拼音小字颜色       */
+    --index-color:     #82869C;   /* 序号颜色               */
+
+    /* ── 高亮（选中项）── */
+    --highlight-bg:    #7AA2F7;   /* 选中项背景色（亮蓝）   */
+    --highlight-text:  #FFFFFF;   /* 选中项文字颜色         */
+
+    /* ── 字号 ── */
+    --font-size:       20px;      /* 候选汉字字号           */
+    --pinyin-size:     13px;      /* 上排拼音字号           */
+
+    /* ── 形状 ── */
+    --corner-radius:   14px;      /* 窗口圆角半径           */
+    --padding-h:       14px;      /* 左右内边距             */
+}

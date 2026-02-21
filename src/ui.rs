@@ -3,9 +3,11 @@
 //! 上排：拼音输入（小灰字）
 //! 下排：数字序号 + 候选汉字
 //!
-//! 无边框、置顶、半透明，圆角矩形。
+//! 无边框、置顶、圆角矩形。
+//! 外观可通过旁边的 style.css 自定义，无需重新编译。
 
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::Once;
 use log::info;
 use windows::core::*;
@@ -15,37 +17,130 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 // ============================================================
-// 视觉常量
+// Theme — 视觉参数（可由 style.css 覆盖）
 // ============================================================
 
+/// BGR 色值（Win32 COLORREF 格式）
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((b as u32) << 16 | (g as u32) << 8 | r as u32)
 }
 
-// 配色
-const BG: COLORREF        = rgb(46, 49, 62);    // #2E313E 深灰背景
-const PINYIN_CLR: COLORREF= rgb(110, 115, 140); // 上排拼音小字颜色（暗灰蓝）
-const TEXT_CLR: COLORREF  = rgb(200, 204, 216); // 候选文字
-const INDEX_CLR: COLORREF = rgb(130, 134, 150); // 序号颜色
-const HL_BG: COLORREF     = rgb(122, 162, 247); // #7AA2F7 高亮背景
-const HL_TEXT: COLORREF   = rgb(255, 255, 255); // 高亮文字
+/// 所有可定制的视觉参数
+#[derive(Clone, Debug)]
+pub struct Theme {
+    pub bg:         COLORREF,  // --bg-color
+    pub text:       COLORREF,  // --text-color
+    pub pinyin:     COLORREF,  // --pinyin-color
+    pub index:      COLORREF,  // --index-color
+    pub hl_bg:      COLORREF,  // --highlight-bg
+    pub hl_text:    COLORREF,  // --highlight-text
+    pub font_sz:    i32,       // --font-size (px)
+    pub pinyin_sz:  i32,       // --pinyin-size (px)
+    pub win_radius: i32,       // --corner-radius (px)
+    pub pad_h:      i32,       // --padding-h (px)
+}
 
-// 字号
-const PINYIN_FONT_SZ: i32 = 13;  // 上排拼音小字
-const CAND_FONT_SZ: i32   = 20;  // 下排候选汉字
-const IDX_FONT_SZ: i32    = 20;  // 序号（和候选同大）
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            bg:         rgb(46, 49, 62),     // #2E313E
+            text:       rgb(200, 204, 216),  // #C8CCD8
+            pinyin:     rgb(110, 115, 140),  // #6E738C
+            index:      rgb(130, 134, 150),  // #82869C
+            hl_bg:      rgb(122, 162, 247),  // #7AA2F7
+            hl_text:    rgb(255, 255, 255),  // #FFFFFF
+            font_sz:    20,
+            pinyin_sz:  13,
+            win_radius: 14,
+            pad_h:      14,
+        }
+    }
+}
 
-// 间距
-const WIN_ALPHA: u8  = 242;
-const PAD_H: i32     = 14;  // 左右内边距
-const PAD_TOP: i32   = 7;   // 顶部内边距
-const PAD_BOT: i32   = 8;   // 底部内边距
-const ROW_GAP: i32   = 3;   // 两排之间的间隔
-const ITEM_GAP: i32  = 22;  // 候选词之间间距
-const HL_PAD_H: i32  = 7;   // 高亮水平内边距
-const HL_PAD_V: i32  = 3;   // 高亮垂直内边距
-const HL_RADIUS: i32 = 7;   // 高亮圆角
-const WIN_RADIUS: i32= 14;  // 窗口圆角
+impl Theme {
+    /// 从 style.css 加载，失败则静默回退到默认值
+    pub fn load() -> Self {
+        // 查找顺序：可执行文件同级目录 → 当前工作目录
+        let css_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("style.css")))
+            .filter(|p| p.exists())
+            .or_else(|| {
+                let cwd = Path::new("style.css");
+                if cwd.exists() { Some(cwd.to_path_buf()) } else { None }
+            });
+
+        let Some(path) = css_path else {
+            info!("[Theme] 未找到 style.css，使用默认配色");
+            return Self::default();
+        };
+
+        let Ok(css) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+
+        let mut theme = Self::default();
+        info!("[Theme] 已加载 {:?}", path);
+
+        // 简单的 CSS 变量解析：逐行查找 --var-name: value;
+        for line in css.lines() {
+            let line = line.trim();
+            if !line.starts_with("--") { continue; }
+
+            // 分割 key: value
+            let Some(colon) = line.find(':') else { continue; };
+            let key = line[..colon].trim();
+            // 去掉 value 末尾的 ";" 和注释 "/*...*/"
+            let raw_val = line[colon + 1..].trim();
+            let val = raw_val
+                .split(';').next().unwrap_or("")
+                .split("/*").next().unwrap_or("")
+                .trim();
+
+            match key {
+                "--bg-color"       => { if let Some(c) = parse_hex_color(val) { theme.bg       = c; } }
+                "--text-color"     => { if let Some(c) = parse_hex_color(val) { theme.text     = c; } }
+                "--pinyin-color"   => { if let Some(c) = parse_hex_color(val) { theme.pinyin   = c; } }
+                "--index-color"    => { if let Some(c) = parse_hex_color(val) { theme.index    = c; } }
+                "--highlight-bg"   => { if let Some(c) = parse_hex_color(val) { theme.hl_bg    = c; } }
+                "--highlight-text" => { if let Some(c) = parse_hex_color(val) { theme.hl_text  = c; } }
+                "--font-size"      => { if let Some(n) = parse_px(val)        { theme.font_sz  = n; } }
+                "--pinyin-size"    => { if let Some(n) = parse_px(val)        { theme.pinyin_sz= n; } }
+                "--corner-radius"  => { if let Some(n) = parse_px(val)        { theme.win_radius=n; } }
+                "--padding-h"      => { if let Some(n) = parse_px(val)        { theme.pad_h    = n; } }
+                _ => {}
+            }
+        }
+
+        theme
+    }
+}
+
+/// 解析 #RRGGBB 格式的颜色值
+fn parse_hex_color(s: &str) -> Option<COLORREF> {
+    let s = s.trim().strip_prefix('#')?;
+    if s.len() != 6 { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some(rgb(r, g, b))
+}
+
+/// 解析 "Npx" 格式的像素值
+fn parse_px(s: &str) -> Option<i32> {
+    s.trim().strip_suffix("px")?.trim().parse().ok()
+}
+
+// ============================================================
+// 固定排版参数（不暴露给 CSS，太细了没必要）
+// ============================================================
+const PAD_TOP: i32  = 7;   // 顶部内边距
+const PAD_BOT: i32  = 8;   // 底部内边距
+const ROW_GAP: i32  = 3;   // 两排间距
+const ITEM_GAP: i32 = 22;  // 候选词间距
+const HL_PAD_H: i32 = 7;   // 高亮水平内边距
+const HL_PAD_V: i32 = 3;   // 高亮垂直内边距
+const HL_RADIUS: i32= 7;   // 高亮圆角
 
 const WND_CLASS: PCWSTR = w!("AiPinyinCandidate");
 static REGISTER_ONCE: Once = Once::new();
@@ -55,16 +150,17 @@ static REGISTER_ONCE: Once = Once::new();
 // ============================================================
 
 struct WindowState {
-    raw_input: String,       // 上排拼音原文
-    candidates: Vec<String>, // 下排候选词
+    raw_input: String,
+    candidates: Vec<String>,
     selected: usize,
-    font_pinyin: HFONT,      // 拼音小字字体
-    font_cand: HFONT,        // 候选汉字字体
-    font_idx: HFONT,         // 序号字体
+    theme: Theme,
+    font_pinyin: HFONT,
+    font_cand: HFONT,
+    font_idx: HFONT,
 }
 
 impl WindowState {
-    fn new() -> Self {
+    fn new(theme: Theme) -> Self {
         unsafe {
             let mk_font = |sz: i32, weight: i32| CreateFontW(
                 sz, 0, 0, 0, weight, 0, 0, 0,
@@ -76,9 +172,10 @@ impl WindowState {
                 raw_input: String::new(),
                 candidates: vec![],
                 selected: 0,
-                font_pinyin: mk_font(PINYIN_FONT_SZ, FW_NORMAL.0 as i32),
-                font_cand:   mk_font(CAND_FONT_SZ,   FW_MEDIUM.0 as i32),
-                font_idx:    mk_font(IDX_FONT_SZ,    FW_NORMAL.0 as i32),
+                font_pinyin: mk_font(theme.pinyin_sz, FW_NORMAL.0 as i32),
+                font_cand:   mk_font(theme.font_sz,   FW_MEDIUM.0 as i32),
+                font_idx:    mk_font(theme.font_sz,   FW_NORMAL.0 as i32),
+                theme,
             }
         }
     }
@@ -93,6 +190,7 @@ impl Drop for WindowState {
         }
     }
 }
+
 
 // ============================================================
 // CandidateWindow — 公开 API
@@ -109,7 +207,8 @@ impl CandidateWindow {
     pub fn new() -> Result<Self> {
         register_class()?;
 
-        let state = Box::new(WindowState::new());
+        let theme = Theme::load();
+        let state = Box::new(WindowState::new(theme));
         let state_ptr = Box::into_raw(state);
 
         let hwnd = unsafe {
@@ -254,7 +353,7 @@ impl CandidateWindow {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
-        let rgn = CreateRoundRectRgn(0, 0, w, h, WIN_RADIUS, WIN_RADIUS);
+        let rgn = CreateRoundRectRgn(0, 0, w, h, state.theme.win_radius, state.theme.win_radius);
         SetWindowRgn(self.hwnd, rgn, TRUE);
 
         // RedrawWindow 立即同步绘制，不依赖消息队列
@@ -355,7 +454,7 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
     let _ = GetClientRect(hwnd, &mut rc);
 
     // ── 背景 ──
-    let bg_brush = CreateSolidBrush(BG);
+    let bg_brush = CreateSolidBrush(state.theme.bg);
     FillRect(hdc, &rc, bg_brush);
     let _ = DeleteObject(bg_brush);
 
@@ -366,9 +465,9 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
     // ── 上排：拼音原文 ──
     if !state.raw_input.is_empty() {
         SelectObject(hdc, state.font_pinyin);
-        SetTextColor(hdc, PINYIN_CLR);
+        SetTextColor(hdc, state.theme.pinyin);
         let w: Vec<u16> = state.raw_input.encode_utf16().collect();
-        let _ = TextOutW(hdc, PAD_H, PAD_TOP, &w);
+        let _ = TextOutW(hdc, state.theme.pad_h, PAD_TOP, &w);
     }
 
     // ── 下排：候选词 ──
@@ -377,14 +476,14 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
     let y_cand = PAD_TOP + pinyin_h + ROW_GAP;
     let y_mid  = y_cand + (cand_row_height(hdc, state)) / 2;
 
-    let mut x = PAD_H;
+    let mut x = state.theme.pad_h;
 
     for (i, cand) in state.candidates.iter().enumerate() {
         let is_sel = i == state.selected;
 
         // 序号
         SelectObject(hdc, state.font_idx);
-        SetTextColor(hdc, if is_sel { HL_TEXT } else { INDEX_CLR });
+        SetTextColor(hdc, if is_sel { state.theme.hl_text } else { state.theme.index });
         let idx_str = format!("{}.", i + 1);
         let idx_w: Vec<u16> = idx_str.encode_utf16().collect();
         let mut isz = SIZE::default();
@@ -407,7 +506,7 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
                 right:  x + csz.cx + HL_PAD_H,
                 bottom: text_y + csz.cy + HL_PAD_V,
             };
-            let hl_brush = CreateSolidBrush(HL_BG);
+            let hl_brush = CreateSolidBrush(state.theme.hl_bg);
             let ob = SelectObject(hdc, hl_brush);
             let op = SelectObject(hdc, GetStockObject(NULL_PEN));
             let _ = RoundRect(hdc, hl_rc.left, hl_rc.top, hl_rc.right, hl_rc.bottom,
@@ -418,7 +517,7 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
         }
 
         // 候选字
-        SetTextColor(hdc, if is_sel { HL_TEXT } else { TEXT_CLR });
+        SetTextColor(hdc, if is_sel { state.theme.hl_text } else { state.theme.text });
         let _ = TextOutW(hdc, x, text_y, &cw);
         x += csz.cx + ITEM_GAP;
     }
@@ -450,7 +549,7 @@ unsafe fn calc_size(hdc: HDC, state: &WindowState) -> (i32, i32) {
     if state.candidates.is_empty() { return (0, 0); }
 
     // 宽度：遍历所有候选词
-    let mut total_w = PAD_H * 2;
+    let mut total_w = state.theme.pad_h * 2;
     for (i, cand) in state.candidates.iter().enumerate() {
         SelectObject(hdc, state.font_idx);
         let idx_str = format!("{}.", i + 1);
@@ -473,7 +572,7 @@ unsafe fn calc_size(hdc: HDC, state: &WindowState) -> (i32, i32) {
         let pw: Vec<u16> = state.raw_input.encode_utf16().collect();
         let mut psz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &pw, &mut psz);
-        total_w = total_w.max(psz.cx + PAD_H * 2);
+        total_w = total_w.max(psz.cx + state.theme.pad_h * 2);
     }
 
     // 高度：上排 + 间隔 + 下排 + 上下内边距
