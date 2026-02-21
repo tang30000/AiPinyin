@@ -24,6 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub static mut FN_PLUGIN_LIST: Option<unsafe fn() -> Vec<crate::plugin_system::PluginInfo>> = None;
 /// 切换插件启用状态
 pub static mut FN_PLUGIN_TOGGLE: Option<unsafe fn(name: &str, hwnd: HWND) -> crate::plugin_system::ToggleResult> = None;
+/// 异步按键处理回调（钩子先拦截，然后通过 PostMessage 调用此函数）
+pub static mut FN_PROCESS_KEY: Option<unsafe fn(vkey: u32)> = None;
 
 // ============================================================
 // Theme — 视觉参数（可由 style.css 覆盖）
@@ -292,10 +294,14 @@ impl CandidateWindow {
             let state = &mut *self.state;
             if state.plugins_active != active {
                 state.plugins_active = active;
-                // 触发重绘以更新按钮颜色
                 let _ = InvalidateRect(self.hwnd, None, TRUE);
             }
         }
+    }
+
+    /// 获取窗口句柄（用于 PostMessage 异步消息）
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
     }
 
     /// 在指定屏幕坐标显示并立即绘制
@@ -480,6 +486,14 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_DESTROY => {
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+        // 钩子异步按键处理：先拦截再通过 PostMessage 到这里处理
+        x if x == crate::WM_IME_KEYDOWN => {
+            let vkey = wparam.0 as u32;
+            if let Some(f) = FN_PROCESS_KEY {
+                f(vkey);
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

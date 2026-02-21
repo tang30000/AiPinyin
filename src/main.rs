@@ -17,6 +17,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::key_event::{InputState, CommitAction, handle_key_down};
 
+/// 自定义消息: 钩子先拦截按键，然后通过此消息异步处理
+const WM_IME_KEYDOWN: u32 = WM_APP + 1;
+
 pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150445bcde);
 
 // ============================================================
@@ -82,6 +85,8 @@ fn main() -> Result<()> {
         // 注册 UI ↔ 插件系统 的回调
         ui::FN_PLUGIN_LIST = Some(cb_plugin_list);
         ui::FN_PLUGIN_TOGGLE = Some(cb_plugin_toggle);
+        // 注册异步按键处理回调
+        ui::FN_PROCESS_KEY = Some(cb_process_key);
 
         // 初始化 [JS] 按钮状态
         let s = &*GLOBAL_STATE;
@@ -121,9 +126,44 @@ unsafe fn cb_plugin_toggle(name: &str, hwnd: HWND) -> plugin_system::ToggleResul
     if GLOBAL_STATE.is_null() { return plugin_system::ToggleResult::Denied; }
     let state = &mut *GLOBAL_STATE;
     let result = state.plugins.toggle(name, hwnd);
-    // 同步 [JS] 按钮状态
     state.cand_win.set_plugins_active(state.plugins.has_active());
     result
+}
+
+// ============================================================
+// 异步按键处理回调（由 wnd_proc 收到 WM_IME_KEYDOWN 后调用）
+// ============================================================
+
+unsafe fn cb_process_key(vkey: u32) {
+    if GLOBAL_STATE.is_null() { return; }
+    let state = &mut *GLOBAL_STATE;
+
+    // 调用原有的按键处理逻辑
+    let result = handle_key_down(&mut state.input, vkey);
+
+    match result.commit {
+        Some(CommitAction::Index(idx)) => {
+            let text = state.current_candidates.get(idx).cloned()
+                .unwrap_or_default();
+            if !text.is_empty() {
+                state.cand_win.hide();
+                state.current_candidates.clear();
+                eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
+                    send_unicode_text(&text));
+            }
+        }
+        Some(CommitAction::Text(text)) => {
+            state.cand_win.hide();
+            state.current_candidates.clear();
+            eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
+                send_unicode_text(&text));
+        }
+        None => {}
+    }
+
+    if result.need_refresh {
+        refresh_candidates(state);
+    }
 }
 
 // ============================================================
@@ -164,35 +204,25 @@ unsafe extern "system" fn low_level_keyboard_hook(
                 return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
             }
 
-            // 中文模式：正常处理
-            let result = handle_key_down(&mut state.input, vkey);
+            // 中文模式：先判断是否要拦截，立即返回，再异步处理
+            let should_eat = match vkey {
+                0x41..=0x5A => true,  // A-Z
+                0x08 => !state.input.engine.is_empty(), // Backspace
+                0x20 => !state.input.engine.is_empty(), // Space
+                0x31..=0x39 => !state.input.engine.is_empty(), // 1-9
+                0x1B => !state.input.engine.is_empty(), // Escape
+                0x0D => !state.input.engine.is_empty(), // Enter
+                _ => false,
+            };
 
-            match result.commit {
-                Some(CommitAction::Index(idx)) => {
-                    // 从当前展示的候选词缓存取文本（包含插件加入的词）
-                    let text = state.current_candidates.get(idx).cloned()
-                        .unwrap_or_default();
-                    if !text.is_empty() {
-                        state.cand_win.hide();
-                        state.current_candidates.clear();
-                        eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
-                            unsafe { send_unicode_text(&text) });
-                    }
-                }
-                Some(CommitAction::Text(text)) => {
-                    state.cand_win.hide();
-                    state.current_candidates.clear();
-                    eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
-                        unsafe { send_unicode_text(&text) });
-                }
-                None => {}
-            }
-
-            if result.need_refresh {
-                refresh_candidates(state);
-            }
-
-            if result.eaten {
+            if should_eat {
+                // 立即拦截，通过 PostMessage 异步处理（避免钩子超时）
+                let _ = PostMessageW(
+                    state.cand_win.hwnd(),
+                    WM_IME_KEYDOWN,
+                    WPARAM(vkey as usize),
+                    LPARAM(0),
+                );
                 return LRESULT(1);
             }
         }
