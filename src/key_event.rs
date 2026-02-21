@@ -80,13 +80,23 @@ pub fn handle_key_down(state: &mut InputState, vkey: u32) -> KeyResult {
                 KeyResult { eaten: true, committed: text, need_refresh: true }
             }
         }
-        // Escape → 取消
+        // Escape → 取消，不输出任何内容
         0x1B => {
             if state.engine.is_empty() {
                 KeyResult { eaten: false, committed: None, need_refresh: false }
             } else {
                 state.engine.clear();
                 KeyResult { eaten: true, committed: None, need_refresh: true }
+            }
+        }
+        // Enter → 以原始字母形式上屏
+        0x0D => {
+            if state.engine.is_empty() {
+                KeyResult { eaten: false, committed: None, need_refresh: false }
+            } else {
+                let raw = state.engine.raw_input().to_string();
+                state.engine.clear();
+                KeyResult { eaten: true, committed: Some(raw), need_refresh: true }
             }
         }
         _ => KeyResult { eaten: false, committed: None, need_refresh: false },
@@ -120,7 +130,7 @@ impl ITfKeyEventSink_Impl for AiPinyinKeyEventSink_Impl {
         let state = self.state.borrow();
         let eat = match wparam.0 as u32 {
             0x41..=0x5A => true,
-            0x08 | 0x20 | 0x1B => !state.engine.is_empty(),
+            0x08 | 0x0D | 0x20 | 0x1B => !state.engine.is_empty(),
             0x31..=0x39 => !state.engine.is_empty(),
             _ => false,
         };

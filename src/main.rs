@@ -95,18 +95,73 @@ unsafe extern "system" fn low_level_keyboard_hook(
             let state = &mut *GLOBAL_STATE;
             let result = handle_key_down(&mut state.input, info.vkCode);
 
+            // 有文本需要上屏（汉字候选 或 原始字母）
+            if let Some(text) = result.committed {
+                state.cand_win.hide();
+                // 先让钩子返回，再注入文本（避免递归）
+                // 用 PostMessage 延迟注入
+                send_unicode_text(&text);
+            }
+
             if result.need_refresh {
                 refresh_candidates(state);
             }
 
             if result.eaten {
-                return LRESULT(1); // 吞掉按键
+                return LRESULT(1); // 吞掉原始按键
             }
         }
     }
 
     CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam)
 }
+
+/// 向当前焦点应用注入 Unicode 文本
+///
+/// 每个字符用 SendInput + KEYEVENTF_UNICODE 发送，
+/// 支持任意 Unicode（中文、符号等）。
+unsafe fn send_unicode_text(text: &str) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    let inputs: Vec<INPUT> = text
+        .encode_utf16()
+        .flat_map(|wchar| {
+            // 每个字符发一个 keydown + keyup
+            [
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: wchar,
+                            dwFlags: KEYEVENTF_UNICODE,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: wchar,
+                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                },
+            ]
+        })
+        .collect();
+
+    if !inputs.is_empty() {
+        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+        eprintln!("[IME] 注入 {} 个字符，sent={}", text.chars().count(), sent);
+    }
+}
+
 
 // ============================================================
 // 候选词刷新 + 多策略光标定位
