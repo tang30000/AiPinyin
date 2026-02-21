@@ -42,6 +42,8 @@ struct ImeState {
     chinese_mode: bool,
     shift_down: bool,
     shift_modified: bool,
+    /// AI 异步推理代次号, 用于丢弃过期结果
+    ai_generation: u64,
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -102,6 +104,7 @@ fn main() -> Result<()> {
         chinese_mode: true,
         shift_down: false,
         shift_modified: false,
+        ai_generation: 0,
     });
 
     unsafe {
@@ -366,74 +369,93 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 
     let raw = state.input.engine.raw_input().to_string();
 
-    let final_cands = if state.ai.ai_first && state.ai.is_available() {
-        // === AI + 字典协作模式 ===
-        // 1. 字典出候选词组 (保证是真词)
-        let dict_cands = state.input.engine.get_candidates();
-        let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
+    // Phase 1: 立即显示字典候选 (同步, <1ms)
+    let dict_cands = state.input.engine.get_candidates();
+    let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
 
-        // 2. AI 对字典候选做完整序列评分 (上下文感知)
-        //    输入 guji + 字典词[估计,古迹,...] → AI 评分排序 → [估计(高分), 古迹, ...]
-        let ai_slots = std::cmp::min(state.cfg.ai.top_k, 5);
-        let ai_scored = state.ai.predict(&raw, &state.history, ai_slots, &dict_after);
-
-        // 3. 合并: AI 排序的在前, 字典兜底补后, 去重
-        let mut merged = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for w in &ai_scored {
-            if seen.insert(w.clone()) { merged.push(w.clone()); }
-        }
-        for w in &dict_after {
-            if seen.insert(w.clone()) { merged.push(w.clone()); }
-            if merged.len() >= 15 { break; }
-        }
-        merged
-    } else {
-        // === 字典主导模式 ===
-        let cands = state.input.engine.get_candidates();
-        let after_plugins = state.plugins.transform_candidates(&raw, cands);
-        if state.cfg.ai.rerank && state.ai.is_available() {
-            state.ai.rerank(&raw, after_plugins, &state.history)
-        } else {
-            after_plugins
-        }
-    };
-    // === 用户自学习词典提权 ===
-    // 将用户学过的词提到前面，没出现在字典中的也插入
-    let final_cands = {
+    // 用户自学习提权
+    let display_cands = {
         let learned = state.user_dict.get_learned_words(&raw);
         if learned.is_empty() {
-            final_cands
+            dict_after.clone()
         } else {
             let mut boosted: Vec<String> = Vec::new();
-            // 先放用户学过的词（按学习次数排序）
             for (word, _count) in &learned {
-                if !boosted.contains(word) {
-                    boosted.push(word.clone());
-                }
+                if !boosted.contains(word) { boosted.push(word.clone()); }
             }
-            // 再放原始候选（去重）
-            for word in &final_cands {
-                if !boosted.contains(word) {
-                    boosted.push(word.clone());
-                }
+            for word in &dict_after {
+                if !boosted.contains(word) { boosted.push(word.clone()); }
             }
             boosted
         }
     };
 
-    let count = std::cmp::min(9, final_cands.len());
+    let count = std::cmp::min(9, display_cands.len());
     if count == 0 { state.cand_win.hide(); return; }
 
-    state.current_candidates = final_cands[..count].to_vec();
+    state.current_candidates = display_cands[..count].to_vec();
     let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
     state.cand_win.update_candidates(&raw, &refs);
 
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
-    let mode = if state.ai.ai_first { "AI主导" } else { "字典+AI" };
-    eprintln!("[IME] pinyin={:?}  cands={}  mode={}  pos=({},{})",
-        raw, count, mode, pt.x, pt.y + 4);
+
+    // Phase 2: AI 推理在后台线程 (异步, 不阻塞 UI)
+    if state.ai.ai_first && state.ai.is_available() {
+        let raw_clone = raw.clone();
+        let dict_clone = dict_after;
+        let hwnd = state.cand_win.hwnd();
+        let ctx_str = state.history.context_string();
+        let ai_top_k = std::cmp::min(state.cfg.ai.top_k, 5);
+
+        // 递增 generation, 后续结果只在 generation 匹配时才应用
+        state.ai_generation += 1;
+        let gen = state.ai_generation;
+
+        std::thread::spawn(move || {
+            // 在新线程中做 AI 推理 (这里不能直接访问 state)
+            // 需要通过全局状态访问 AI predictor
+            let state_ptr = GLOBAL_STATE;
+            if state_ptr.is_null() { return; }
+            let state = &mut *state_ptr;
+
+            let ai_scored = state.ai.predict(
+                &raw_clone, &state.history, ai_top_k, &dict_clone,
+            );
+
+            // 如果 generation 已变 (用户又输入了新的), 丢弃结果
+            if state.ai_generation != gen { return; }
+
+            // 合并 AI 排序结果 + 字典兜底
+            let mut merged = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+
+            // 用户自学习先
+            let learned = state.user_dict.get_learned_words(&raw_clone);
+            for (word, _) in &learned {
+                if seen.insert(word.clone()) { merged.push(word.clone()); }
+            }
+
+            for w in &ai_scored {
+                if seen.insert(w.clone()) { merged.push(w.clone()); }
+            }
+            for w in &dict_clone {
+                if seen.insert(w.clone()) { merged.push(w.clone()); }
+                if merged.len() >= 15 { break; }
+            }
+
+            let count = std::cmp::min(9, merged.len());
+            if count == 0 { return; }
+
+            state.current_candidates = merged[..count].to_vec();
+            let refs: Vec<&str> = state.current_candidates.iter()
+                .map(|s| s.as_str()).collect();
+            state.cand_win.update_candidates(&raw_clone, &refs);
+        });
+    }
+
+    eprintln!("[IME] pinyin={:?}  cands={}  mode={}",
+        raw, count, if state.ai.ai_first { "AI异步" } else { "字典" });
 }
 
 /// 多策略获取光标屏幕坐标

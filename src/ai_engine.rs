@@ -337,80 +337,91 @@ fn run_predict(
         return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
-    // === 多音节: 字典引导评分 ===
-    // 只评估字典中字数 == 音节数的词组
+    // === 多音节: 字典引导评分 (按首字分组, 共享推理) ===
     let target_len = syllables.len();
     let candidates: Vec<&String> = dict_words.iter()
         .filter(|w| w.chars().count() == target_len)
-        .take(20)  // 最多评估20个候选
+        .take(9)  // 限制候选数, 避免阻塞键盘钩子 (Windows 300ms 超时)
         .collect();
 
     if candidates.is_empty() {
-        // 无字典候选, 回退到老的贪心生成
         return run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k);
     }
 
-    // 对每个候选词组做完整序列评分
-    let mut scored: Vec<(String, f32)> = Vec::new();
-
-    // 第一步: 一次推理获取所有首字分数
+    // 第一步: 一次推理获取所有首字分数 (1 次推理)
     let py1_id = match vocab.pinyin2id.get(syllables[0].as_str()) {
         Some(&id) => id, None => return Ok(vec![]),
     };
-    let mut input_ids = ctx_prefix.clone();
-    input_ids.push(py1_id);
-    let logits1 = run_inference(session, &input_ids)?;
-    let offset1 = (input_ids.len() - 1) * vocab_size;
+    let mut base_ids = ctx_prefix.clone();
+    base_ids.push(py1_id);
+    let logits1 = run_inference(session, &base_ids)?;
+    let offset1 = (base_ids.len() - 1) * vocab_size;
 
-    // 收集所有需要评估的独特首字
-    let mut first_chars_needed: std::collections::HashMap<String, (i64, f32)> = std::collections::HashMap::new();
+    // 按首字分组, 共享推理前缀 → 相同首字只需 1 次推理
+    let mut by_first: std::collections::HashMap<String, Vec<&String>> = std::collections::HashMap::new();
     for word in &candidates {
         if let Some(first_ch) = word.chars().next() {
-            let ch_str = first_ch.to_string();
-            if !first_chars_needed.contains_key(&ch_str) {
-                if let Some(&cid) = vocab.char2id.get(&ch_str) {
-                    let score = if offset1 + cid as usize >= logits1.len() { -50.0 }
-                                else { logits1[offset1 + cid as usize] };
-                    first_chars_needed.insert(ch_str, (cid, score));
-                }
-            }
+            by_first.entry(first_ch.to_string()).or_default().push(word);
         }
     }
 
-    // 第二步+: 对每个独特首字, 计算后续字母分数
-    for word in &candidates {
-        let chars: Vec<char> = word.chars().collect();
-        if chars.len() != target_len { continue; }
+    let mut scored: Vec<(String, f32)> = Vec::new();
 
-        let first_ch_str = chars[0].to_string();
-        let (first_id, first_score) = match first_chars_needed.get(&first_ch_str) {
-            Some(v) => *v, None => continue,
+    // 每个独特首字只做 1 次推理 (总计 ~5 次)
+    for (first_ch_str, words) in &by_first {
+        let first_id = match vocab.char2id.get(first_ch_str) {
+            Some(&id) => id, None => continue,
         };
+        let first_score = if offset1 + first_id as usize >= logits1.len() { -50.0 }
+                          else { logits1[offset1 + first_id as usize] };
 
-        let mut total = first_score;
-        let mut valid = true;
-        let mut cur_ids = input_ids.clone();
-        cur_ids.push(first_id);
-
-        for i in 1..target_len {
-            let syl = &syllables[i];
-            let py_id = match vocab.pinyin2id.get(syl.as_str()) {
-                Some(&id) => id, None => { valid = false; break; }
+        if target_len == 2 {
+            // 二字词: 共享 [base][char1][py2] 推理, 从中读取所有第二字分数
+            let py2_id = match vocab.pinyin2id.get(syllables[1].as_str()) {
+                Some(&id) => id, None => continue,
             };
-            cur_ids.push(py_id);
+            let mut ids2 = base_ids.clone();
+            ids2.push(first_id);
+            ids2.push(py2_id);
+            let logits2 = run_inference(session, &ids2)?;
+            let offset2 = (ids2.len() - 1) * vocab_size;
 
-            let logits = run_inference(session, &cur_ids)?;
-            let lp = (cur_ids.len() - 1) * vocab_size;
-            let ch_str = chars[i].to_string();
-            let ch_score = vocab.char2id.get(&ch_str)
-                .and_then(|&cid| { let p = lp + cid as usize; if p < logits.len() { Some(logits[p]) } else { None } })
-                .unwrap_or(-50.0);
-            total += ch_score;
-            cur_ids.push(vocab.char2id.get(&ch_str).copied().unwrap_or(vocab.unk_id));
-        }
-
-        if valid {
-            scored.push((word.to_string(), total));
+            for word in words {
+                let chars: Vec<char> = word.chars().collect();
+                if chars.len() != 2 { continue; }
+                let ch2_str = chars[1].to_string();
+                let ch2_score = vocab.char2id.get(&ch2_str)
+                    .map(|&cid| {
+                        let p = offset2 + cid as usize;
+                        if p < logits2.len() { logits2[p] } else { -50.0 }
+                    })
+                    .unwrap_or(-50.0);
+                scored.push((word.to_string(), first_score + ch2_score));
+            }
+        } else {
+            // 3+字: 逐字推理 (较少见)
+            for word in words {
+                let chars: Vec<char> = word.chars().collect();
+                let mut total = first_score;
+                let mut valid = true;
+                let mut cur_ids = base_ids.clone();
+                cur_ids.push(first_id);
+                for i in 1..target_len {
+                    let py_id = match vocab.pinyin2id.get(syllables[i].as_str()) {
+                        Some(&id) => id, None => { valid = false; break; }
+                    };
+                    cur_ids.push(py_id);
+                    let logits = run_inference(session, &cur_ids)?;
+                    let lp = (cur_ids.len() - 1) * vocab_size;
+                    let ch_str = chars[i].to_string();
+                    let ch_score = vocab.char2id.get(&ch_str)
+                        .and_then(|&cid| { let p = lp + cid as usize; if p < logits.len() { Some(logits[p]) } else { None } })
+                        .unwrap_or(-50.0);
+                    total += ch_score;
+                    cur_ids.push(vocab.char2id.get(&ch_str).copied().unwrap_or(vocab.unk_id));
+                }
+                if valid { scored.push((word.to_string(), total)); }
+            }
         }
     }
 
