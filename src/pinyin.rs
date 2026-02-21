@@ -62,31 +62,34 @@ const VALID_SYLLABLES: &[&str] = &[
 ];
 
 // ============================================================
-// 拼音切分 — 贪心最长匹配
+// 拼音切分 — 贪心最长匹配（纯 ASCII bytes 操作）
 // ============================================================
 
+/// 将纯 ASCII 拼音字符串切分为音节
 fn split_pinyin(input: &str) -> Vec<String> {
+    debug_assert!(input.is_ascii(), "split_pinyin expects pure ASCII");
+    let bytes = input.as_bytes();
+    let len = bytes.len();
     let mut result = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
     let mut i = 0;
 
     while i < len {
         let mut best = 0;
         let max = std::cmp::min(6, len - i);
         for try_len in (1..=max).rev() {
-            let s: String = chars[i..i + try_len].iter().collect();
-            if is_valid_syllable(&s) {
+            // 安全：纯 ASCII 所以字节切片即字符切片
+            let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..i + try_len]) };
+            if is_valid_syllable(s) {
                 best = try_len;
                 break;
             }
         }
         if best > 0 {
-            let syl: String = chars[i..i + best].iter().collect();
-            result.push(syl);
+            let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..i + best]) };
+            result.push(s.to_string());
             i += best;
         } else {
-            result.push(chars[i].to_string());
+            result.push((bytes[i] as char).to_string());
             i += 1;
         }
     }
@@ -97,12 +100,35 @@ fn is_valid_syllable(s: &str) -> bool {
     VALID_SYLLABLES.contains(&s)
 }
 
-/// 从拼音字符串提取首字母缩写: "shijian" -> "sj"
+/// 从纯 ASCII 拼音提取首字母缩写: "shijian" -> "sj"
 fn make_abbreviation(pinyin: &str) -> String {
     split_pinyin(pinyin)
         .iter()
-        .map(|s| s.chars().next().unwrap_or(' '))
+        .map(|s| s.as_bytes()[0] as char)
         .collect()
+}
+
+/// 清洗拼音字段：
+/// - ü / µ / 眉 / lv类似乱码 → v
+/// - 只保留 a-z 字符
+/// - 返回 None 表示清洗后为空
+fn sanitize_pinyin(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            'a'..='z' => out.push(ch),
+            // ü 及其声调变体 → v
+            '\u{00fc}' | '\u{01dc}' | '\u{01da}' | '\u{01d8}' | '\u{01d6}' => out.push('v'),
+            // 乱码残留（如 眉 代替 ü）—— 跳过非 ASCII
+            _ if !ch.is_ascii() => { /* skip */ }
+            // 其他 ASCII 但非小写字母（数字/空格等）—— 跳过
+            _ => {}
+        }
+    }
+
+    if out.is_empty() { None } else { Some(out) }
 }
 
 // ============================================================
@@ -143,15 +169,19 @@ impl Dictionary {
             if line.is_empty() || line.starts_with('#') { continue; }
 
             let mut parts = line.splitn(3, ',');
-            let pinyin = match parts.next() { Some(s) => s.trim(), None => continue };
+            let pinyin_raw = match parts.next() { Some(s) => s.trim(), None => continue };
             let word = match parts.next() { Some(s) => s.trim(), None => continue };
             let weight: u32 = parts.next()
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(50);
 
-            if pinyin.is_empty() || word.is_empty() { continue; }
-            // 过滤非纯 ASCII 拼音（脏数据保护）
-            if !pinyin.bytes().all(|b| b.is_ascii_lowercase()) { continue; }
+            if pinyin_raw.is_empty() || word.is_empty() { continue; }
+
+            // 清洗拼音：ü→v，去掉非 a-z 字符
+            let pinyin = match sanitize_pinyin(pinyin_raw) {
+                Some(p) => p,
+                None => continue,
+            };
 
             let cand = Candidate {
                 word: word.to_string(),
@@ -459,5 +489,17 @@ mod tests {
         dict.boost_weight("shi", "时", 20);
         let r = dict.lookup("shi");
         assert_eq!(r[0].word, "时");
+    }
+
+    #[test]
+    fn test_sanitize_pinyin() {
+        // 正常拼音不变
+        assert_eq!(sanitize_pinyin("shijian"), Some("shijian".into()));
+        // ü → v
+        assert_eq!(sanitize_pinyin("l\u{00fc}"), Some("lv".into()));
+        // 非 ASCII 字符被移除
+        assert_eq!(sanitize_pinyin("buganl\u{00fc}emei"), Some("buganlvemei".into()));
+        // 纯乱码 → None
+        assert_eq!(sanitize_pinyin("眉"), None);
     }
 }
