@@ -18,6 +18,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
+    "Win32_UI_Accessibility",
 ] }
 windows-core = "0.58"
 
