@@ -25,6 +25,9 @@ pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150
 struct ImeState {
     input: InputState,
     cand_win: ui::CandidateWindow,
+    chinese_mode: bool,   // true=中文拦截模式, false=英文直通
+    shift_down: bool,     // Shift 当前是否按住
+    shift_modified: bool, // Shift 按住期间是否有其他键被按下
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -54,6 +57,9 @@ fn main() -> Result<()> {
     let state = Box::new(ImeState {
         input: InputState::new(),
         cand_win,
+        chinese_mode: true,    // 默认中文模式
+        shift_down: false,
+        shift_modified: false,
     });
 
     unsafe {
@@ -67,6 +73,7 @@ fn main() -> Result<()> {
             0,
         )?;
         println!("  ✅ 全局钩子已安装，请切换到其他窗口打字...");
+        println!("  【Shift】切换中/英文模式");
 
         // 消息循环（不创建任何窗口，只驱动钩子和候选窗口）
         ui::run_message_loop();
@@ -86,20 +93,42 @@ fn main() -> Result<()> {
 unsafe extern "system" fn low_level_keyboard_hook(
     code: i32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
-    if code == 0
-        && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize)
-    {
-        let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    if code != 0 || GLOBAL_STATE.is_null() {
+        return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
+    }
 
-        if !GLOBAL_STATE.is_null() {
-            let state = &mut *GLOBAL_STATE;
-            let result = handle_key_down(&mut state.input, info.vkCode);
+    let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    let vkey = info.vkCode;
+    let state = &mut *GLOBAL_STATE;
 
-            // 有文本需要上屏（汉字候选 或 原始字母）
+    // Shift 键（左/右/通用）
+    let is_shift = vkey == 0x10 || vkey == 0xA0 || vkey == 0xA1;
+
+    match wparam.0 as u32 {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if is_shift {
+                // 记录 Shift 按下，等待判断是否单独抬起
+                state.shift_down = true;
+                state.shift_modified = false;
+                // Shift 本身不吃掉
+                return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
+            }
+
+            // 有其他键与 Shift 同时按 → 不是单独 Shift
+            if state.shift_down {
+                state.shift_modified = true;
+            }
+
+            // 英文直通模式：所有键直接放行
+            if !state.chinese_mode {
+                return CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam);
+            }
+
+            // 中文模式：正常处理
+            let result = handle_key_down(&mut state.input, vkey);
+
             if let Some(text) = result.committed {
                 state.cand_win.hide();
-                // 先让钩子返回，再注入文本（避免递归）
-                // 用 PostMessage 延迟注入
                 send_unicode_text(&text);
             }
 
@@ -108,12 +137,43 @@ unsafe extern "system" fn low_level_keyboard_hook(
             }
 
             if result.eaten {
-                return LRESULT(1); // 吞掉原始按键
+                return LRESULT(1);
             }
         }
+
+        WM_KEYUP | WM_SYSKEYUP => {
+            if is_shift && state.shift_down {
+                state.shift_down = false;
+                if !state.shift_modified {
+                    // 单独 Shift → 切换中英文模式
+                    toggle_mode(state);
+                }
+                state.shift_modified = false;
+            }
+        }
+
+        _ => {}
     }
 
     CallNextHookEx(HHOOK(std::ptr::null_mut()), code, wparam, lparam)
+}
+
+/// 切换中英文模式
+unsafe fn toggle_mode(state: &mut ImeState) {
+    state.chinese_mode = !state.chinese_mode;
+
+    if !state.chinese_mode {
+        // 切换到英文：若有未提交的拼音，直接以字母形式输出
+        if !state.input.engine.is_empty() {
+            let raw = state.input.engine.raw_input().to_string();
+            state.input.engine.clear();
+            send_unicode_text(&raw);
+        }
+        state.cand_win.hide();
+        eprintln!("[IME] ⌨ 英文模式（直通）");
+    } else {
+        eprintln!("[IME] 🀄 中文模式（拦截）");
+    }
 }
 
 /// 向当前焦点应用注入 Unicode 文本
