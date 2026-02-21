@@ -79,6 +79,14 @@ fn main() -> Result<()> {
     unsafe {
         GLOBAL_STATE = Box::into_raw(state);
 
+        // 注册 UI ↔ 插件系统 的回调
+        ui::FN_PLUGIN_LIST = Some(cb_plugin_list);
+        ui::FN_PLUGIN_TOGGLE = Some(cb_plugin_toggle);
+
+        // 初始化 [JS] 按钮状态
+        let s = &*GLOBAL_STATE;
+        s.cand_win.set_plugins_active(s.plugins.has_active());
+
         let hinstance = GetModuleHandleW(None)?;
         let hook = SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -98,6 +106,24 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ============================================================
+// 插件 UI 回调（由 ui::show_plugin_menu 调用）
+// ============================================================
+
+unsafe fn cb_plugin_list() -> Vec<plugin_system::PluginInfo> {
+    if GLOBAL_STATE.is_null() { return vec![]; }
+    (*GLOBAL_STATE).plugins.plugin_list()
+}
+
+unsafe fn cb_plugin_toggle(name: &str, hwnd: HWND) -> plugin_system::ToggleResult {
+    if GLOBAL_STATE.is_null() { return plugin_system::ToggleResult::Denied; }
+    let state = &mut *GLOBAL_STATE;
+    let result = state.plugins.toggle(name, hwnd);
+    // 同步 [JS] 按钮状态
+    state.cand_win.set_plugins_active(state.plugins.has_active());
+    result
 }
 
 // ============================================================

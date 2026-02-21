@@ -3,8 +3,8 @@
 //! 上排：拼音输入（小灰字）
 //! 下排：数字序号 + 候选汉字
 //!
-//! 无边框、置顶、圆角矩形。
-//! 外观可通过旁边的 style.css 自定义，无需重新编译。
+//! 右上角：[JS] 按鈕 — 点击弹出插件管理菜单。
+//! 外观可通过旁边的 style.css 自定义。
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -15,6 +15,15 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+// ============================================================
+// 静态回调函数（由 main.rs 在启动时注入）
+// ============================================================
+
+/// 获取当前插件列表
+pub static mut FN_PLUGIN_LIST: Option<unsafe fn() -> Vec<crate::plugin_system::PluginInfo>> = None;
+/// 切换插件启用状态
+pub static mut FN_PLUGIN_TOGGLE: Option<unsafe fn(name: &str, hwnd: HWND) -> crate::plugin_system::ToggleResult> = None;
 
 // ============================================================
 // Theme — 视觉参数（可由 style.css 覆盖）
@@ -157,6 +166,10 @@ struct WindowState {
     font_pinyin: HFONT,
     font_cand: HFONT,
     font_idx: HFONT,
+    /// [JS] 按鈕在客户区的位置（用于点击检测）
+    js_btn_rect: RECT,
+    /// 当前是否有激活的插件
+    plugins_active: bool,
 }
 
 impl WindowState {
@@ -176,10 +189,14 @@ impl WindowState {
                 font_cand:   mk_font(theme.font_sz,   FW_MEDIUM.0 as i32),
                 font_idx:    mk_font(theme.font_sz,   FW_NORMAL.0 as i32),
                 theme,
+                js_btn_rect: RECT::default(),
+                plugins_active: false,
             }
         }
     }
 }
+
+
 
 impl Drop for WindowState {
     fn drop(&mut self) {
@@ -266,6 +283,18 @@ impl CandidateWindow {
             state.candidates = candidates.iter().map(|s| s.to_string()).collect();
             state.selected = 0;
             self.resize_and_redraw(state);
+        }
+    }
+
+    /// 更新 [JS] 按钮的激活状态（有无运行中的插件）
+    pub fn set_plugins_active(&self, active: bool) {
+        unsafe {
+            let state = &mut *self.state;
+            if state.plugins_active != active {
+                state.plugins_active = active;
+                // 触发重绘以更新按钮颜色
+                let _ = InvalidateRect(self.hwnd, None, TRUE);
+            }
         }
     }
 
@@ -425,12 +454,26 @@ unsafe extern "system" fn wnd_proc(
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WindowState;
-            if !ptr.is_null() { paint(hdc, hwnd, &*ptr); }
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+            if !ptr.is_null() { paint(hdc, hwnd, &mut *ptr); }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_LBUTTONDOWN => {
+            // 检测点击是否命中 [JS] 按鈕
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+            if !ptr.is_null() {
+                let state = &*ptr;
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let pt = POINT { x, y };
+                if PtInRect(&state.js_btn_rect, pt).as_bool() {
+                    show_plugin_menu(hwnd);
+                }
+            }
+            LRESULT(0)
+        }
         WM_KEYDOWN if wparam.0 == 0x1B => { // ESC
             PostQuitMessage(0);
             LRESULT(0)
@@ -443,11 +486,76 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// 弹出插件管理菜单
+unsafe fn show_plugin_menu(hwnd: HWND) {
+    let list = match FN_PLUGIN_LIST {
+        Some(f) => f(),
+        None => return,
+    };
+    if list.is_empty() {
+        MessageBoxW(hwnd,
+            w!("plugins/ 目录下暂无插件，请在 plugins/ 目录中放置 .js 文件。"),
+            w!("AiPinyin 插件"),
+            MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    let menu = match CreatePopupMenu() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    // 瞎标当前位置展示菜单
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+
+    // 添加标题行（灰色不可点）
+    let title_w: Vec<u16> = format!("插件管理  (最多 {} 个同时激活)",
+        crate::plugin_system::MAX_ACTIVE)
+        .encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED,
+        0, PCWSTR(title_w.as_ptr()));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+
+    // 每个插件一行
+    for (i, info) in list.iter().enumerate() {
+        let label = format!("{} {}{}",
+            if info.enabled { "●" } else { "○" },
+            info.name,
+            if info.authorized { "" } else { "  [未授权]" });
+        let label_w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+        let flags = MF_STRING
+            | if info.enabled { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, flags, i + 1, PCWSTR(label_w.as_ptr()));
+    }
+
+    // 显示菜单并等待选择
+    let id = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x, pt.y, 0, hwnd, None,
+    );
+    let _ = DestroyMenu(menu);
+
+    // 处理选择
+    if id.0 > 0 {
+        let idx = (id.0 as usize) - 1;
+        if let Some(info) = list.get(idx) {
+            if let Some(toggle) = FN_PLUGIN_TOGGLE {
+                toggle(&info.name, hwnd);
+                // 重绘更新按鈕状态
+                let _ = InvalidateRect(hwnd, None, TRUE);
+                let _ = UpdateWindow(hwnd);
+            }
+        }
+    }
+}
+
 // ============================================================
 // 绘制：双排布局
 // ============================================================
 
-unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
+unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
     let mut rc = RECT::default();
     let _ = GetClientRect(hwnd, &mut rc);
 
@@ -455,6 +563,45 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &WindowState) {
     let bg_brush = CreateSolidBrush(state.theme.bg);
     FillRect(hdc, &rc, bg_brush);
     let _ = DeleteObject(bg_brush);
+
+    // ── [JS] 按鈕（右上角）──
+    {
+        SelectObject(hdc, state.font_pinyin);
+        let label_w: Vec<u16> = "[JS]".encode_utf16().collect();
+        let mut lsz = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &label_w, &mut lsz);
+
+        let btn_pad = 4i32;
+        let bx = rc.right - lsz.cx - btn_pad * 2 - state.theme.pad_h;
+        let by = PAD_TOP - 1;
+
+        // 抽屉窗口对 paint() 昦4个參数，用 state.js_btn_rect 存储
+        state.js_btn_rect = RECT {
+            left: bx - btn_pad,
+            top: by - btn_pad,
+            right: bx + lsz.cx + btn_pad,
+            bottom: by + lsz.cy + btn_pad,
+        };
+
+        if state.plugins_active {
+            // 激活：亮蓝圆角背景
+            let b = CreateSolidBrush(state.theme.hl_bg);
+            let old = SelectObject(hdc, b);
+            let p = SelectObject(hdc, GetStockObject(NULL_PEN));
+            let _ = RoundRect(hdc,
+                state.js_btn_rect.left, state.js_btn_rect.top,
+                state.js_btn_rect.right, state.js_btn_rect.bottom, 5, 5);
+            SelectObject(hdc, p);
+            SelectObject(hdc, old);
+            let _ = DeleteObject(b);
+            SetTextColor(hdc, state.theme.hl_text);
+        } else {
+            // 未激活：灰色文字
+            SetTextColor(hdc, state.theme.index);
+        }
+        SetBkMode(hdc, TRANSPARENT);
+        let _ = TextOutW(hdc, bx, by, &label_w);
+    }
 
     if state.candidates.is_empty() { return; }
 
