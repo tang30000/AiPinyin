@@ -31,6 +31,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
+# JS 插件引擎 (QuickJS-NG 嵌入式沙箱)
+rquickjs = { version = "0.11", features = ["full"] }
+
 # 日志
 log = "0.4"
 env_logger = "0.11"

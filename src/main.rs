@@ -5,6 +5,7 @@
 mod guardian;
 pub mod key_event;
 pub mod pinyin;
+pub mod plugin_system;
 pub mod ui;
 
 use std::cmp::min;
@@ -25,9 +26,10 @@ pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150
 struct ImeState {
     input: InputState,
     cand_win: ui::CandidateWindow,
-    chinese_mode: bool,   // true=中文拦截模式, false=英文直通
-    shift_down: bool,     // Shift 当前是否按住
-    shift_modified: bool, // Shift 按住期间是否有其他键被按下
+    plugins: plugin_system::PluginSystem,  // JS 插件系统
+    chinese_mode: bool,
+    shift_down: bool,
+    shift_modified: bool,
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -53,11 +55,20 @@ fn main() -> Result<()> {
 
     let _guardian = guardian::start_guardian(guardian::GuardianConfig::default());
 
+    // 加载 JS 插件（exe 旁的 plugins/ 目录）
+    let mut plugins = plugin_system::PluginSystem::new()?;
+    let plugins_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("plugins")))
+        .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+    plugins.load_dir(&plugins_dir);
+
     let cand_win = ui::CandidateWindow::new()?;
     let state = Box::new(ImeState {
         input: InputState::new(),
         cand_win,
-        chinese_mode: true,    // 默认中文模式
+        plugins,
+        chinese_mode: true,
         shift_down: false,
         shift_modified: false,
     });
@@ -234,19 +245,21 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     let cands = state.input.engine.get_candidates();
+    // 经过 JS 插件流水线处理
     let refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
     let count = min(9, refs.len());
-    if count == 0 {
-        state.cand_win.hide();
-        return;
-    }
+    if count == 0 { state.cand_win.hide(); return; }
 
     let raw = state.input.engine.raw_input().to_string();
-    state.cand_win.update_candidates(&raw, &refs[..count]);
+    let processed = state.plugins.transform_candidates(&raw, cands);
+    let proc_refs: Vec<&str> = processed.iter().map(|s| s.as_str()).collect();
+    let final_count = min(9, proc_refs.len());
+
+    state.cand_win.update_candidates(&raw, &proc_refs[..final_count]);
 
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
-    eprintln!("[IME] 拼音={:?}  候选={}  位置=({},{})", raw, count, pt.x, pt.y + 4);
+    eprintln!("[IME] 拼音={:?}  候选={}  位置=({},{})", raw, final_count, pt.x, pt.y + 4);
 }
 
 /// 多策略获取光标屏幕坐标
