@@ -19,6 +19,7 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
 ] }
+windows-core = "0.58"
 
 # ONNX 推理引擎 - 加载本地 AI 权重 (暂时注释，等核心框架稳定后再集成)
 # ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
