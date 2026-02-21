@@ -1,0 +1,16 @@
+# AiPinyin 配置文件
+# 放置于 aipinyin.exe 同目录
+
+[engine]
+# 候选词模式: "ai" = AI主导(字典兜底), "dict" = 字典主导(AI重排)
+mode = "ai"
+
+[ai]
+# AI 候选数量 (1-9)
+top_k = 9
+
+[ui]
+# 候选窗口字体大小
+font_size = 16
+# 候选窗口透明度 (0-255, 255=不透明)
+opacity = 240

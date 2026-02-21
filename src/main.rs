@@ -4,6 +4,7 @@
 
 mod guardian;
 pub mod ai_engine;
+pub mod config;
 pub mod key_event;
 pub mod pinyin;
 pub mod plugin_system;
@@ -33,6 +34,7 @@ struct ImeState {
     plugins: plugin_system::PluginSystem,
     ai: ai_engine::AIPredictor,
     history: ai_engine::HistoryBuffer,
+    cfg: config::Config,
     /// 候选窗口当前显示的候选词（经过插件+AI处理后）
     current_candidates: Vec<String>,
     chinese_mode: bool,
@@ -71,8 +73,13 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
     plugins.load_dir(&plugins_dir);
 
+    // 加载配置
+    let cfg = config::Config::load();
+
     // 初始化 AI 推理引擎
-    let ai = ai_engine::AIPredictor::new();
+    let mut ai = ai_engine::AIPredictor::new();
+    // 应用配置: 引擎模式
+    ai.ai_first = cfg.engine.mode == config::EngineMode::Ai;
     let history = ai_engine::HistoryBuffer::new(10);
 
     let cand_win = ui::CandidateWindow::new()?;
@@ -82,6 +89,7 @@ fn main() -> Result<()> {
         plugins,
         ai,
         history,
+        cfg,
         current_candidates: Vec::new(),
         chinese_mode: true,
         shift_down: false,
@@ -330,7 +338,7 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     let final_cands = if state.ai.ai_first && state.ai.is_available() {
         // === AI 主导模式 ===
         // AI 直接预测候选, 字典兜底
-        let mut ai_cands = state.ai.predict(&raw, &state.history, 9);
+        let mut ai_cands = state.ai.predict(&raw, &state.history, state.cfg.ai.top_k);
         if ai_cands.is_empty() {
             // AI 无结果 → 回退字典
             let dict_cands = state.input.engine.get_candidates();
