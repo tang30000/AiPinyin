@@ -21,24 +21,24 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((b as u32) << 16 | (g as u32) << 8 | r as u32)
 }
 
-// Catppuccin Mocha 配色方案
-const BG: COLORREF = rgb(30, 30, 46);
-const TEXT_CLR: COLORREF = rgb(205, 214, 244);
-const INDEX_CLR: COLORREF = rgb(108, 112, 134);
-const HL_BG: COLORREF = rgb(137, 180, 250);
-const HL_TEXT: COLORREF = rgb(30, 30, 46);
+// 配色方案 — 深灰 + 亮蓝高亮
+const BG: COLORREF = rgb(46, 49, 62);          // #2E313E 深灰背景
+const TEXT_CLR: COLORREF = rgb(200, 204, 216);  // #C8CCD8 柔白文字
+const INDEX_CLR: COLORREF = rgb(130, 134, 150); // #828696 灰色序号
+const HL_BG: COLORREF = rgb(122, 162, 247);     // #7AA2F7 亮蓝高亮
+const HL_TEXT: COLORREF = rgb(255, 255, 255);   // #FFFFFF 高亮文字纯白
 
 // 排版参数
-const FONT_SZ: i32 = 22;
-const IDX_FONT_SZ: i32 = 14;
-const WIN_ALPHA: u8 = 235;
-const PAD_H: i32 = 16;
-const PAD_V: i32 = 10;
-const ITEM_GAP: i32 = 24;
-const HL_PAD_H: i32 = 6;
-const HL_PAD_V: i32 = 3;
-const HL_RADIUS: i32 = 6;
-const WIN_RADIUS: i32 = 12;   // 窗口圆角半径
+const FONT_SZ: i32 = 24;          // 候选字体大小
+const IDX_FONT_SZ: i32 = 16;      // 序号字体大小
+const WIN_ALPHA: u8 = 240;         // 窗口透明度
+const PAD_H: i32 = 18;             // 水平内边距
+const PAD_V: i32 = 12;             // 垂直内边距
+const ITEM_GAP: i32 = 28;          // 候选词间距
+const HL_PAD_H: i32 = 8;           // 高亮水平内边距
+const HL_PAD_V: i32 = 4;           // 高亮垂直内边距
+const HL_RADIUS: i32 = 8;          // 高亮圆角半径
+const WIN_RADIUS: i32 = 14;        // 窗口圆角半径
 
 const WND_CLASS: PCWSTR = w!("AiPinyinCandidate");
 static REGISTER_ONCE: Once = Once::new();
