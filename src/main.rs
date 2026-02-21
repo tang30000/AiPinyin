@@ -9,6 +9,7 @@ pub mod key_event;
 pub mod pinyin;
 pub mod plugin_system;
 pub mod ui;
+pub mod user_dict;
 
 
 use anyhow::Result;
@@ -35,6 +36,7 @@ struct ImeState {
     ai: ai_engine::AIPredictor,
     history: ai_engine::HistoryBuffer,
     cfg: config::Config,
+    user_dict: user_dict::UserDict,
     /// 候选窗口当前显示的候选词（经过插件+AI处理后）
     current_candidates: Vec<String>,
     chinese_mode: bool,
@@ -83,6 +85,8 @@ fn main() -> Result<()> {
     let history = ai_engine::HistoryBuffer::new(10);
 
     let cand_win = ui::CandidateWindow::new()?;
+    let user_dict = user_dict::UserDict::load();
+
     let state = Box::new(ImeState {
         input: InputState::new(),
         cand_win,
@@ -90,6 +94,7 @@ fn main() -> Result<()> {
         ai,
         history,
         cfg,
+        user_dict,
         current_candidates: Vec::new(),
         chinese_mode: true,
         shift_down: false,
@@ -155,6 +160,9 @@ unsafe fn cb_process_key(vkey: u32) {
     if GLOBAL_STATE.is_null() { return; }
     let state = &mut *GLOBAL_STATE;
 
+    // 保存当前拼音（handle_key_down 可能会 clear）
+    let raw_before = state.input.engine.raw_input().to_string();
+
     // 调用原有的按键处理逻辑
     let result = handle_key_down(&mut state.input, vkey);
 
@@ -166,7 +174,11 @@ unsafe fn cb_process_key(vkey: u32) {
                 state.cand_win.hide();
                 state.current_candidates.clear();
                 state.history.push(&text);  // 记录上屏历史
-                eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
+                // 自学习：记录 (拼音 → 选词)
+                if !raw_before.is_empty() {
+                    state.user_dict.learn(&raw_before, &text);
+                }
+                eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                     send_unicode_text(&text));
             }
         }
@@ -174,7 +186,7 @@ unsafe fn cb_process_key(vkey: u32) {
             state.cand_win.hide();
             state.current_candidates.clear();
             state.history.push(&text);  // 记录上屏历史
-            eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
+            eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                 send_unicode_text(&text));
         }
         None => {}
@@ -367,6 +379,29 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
             state.ai.rerank(&raw, after_plugins, &state.history)
         } else {
             after_plugins
+        }
+    };
+    // === 用户自学习词典提权 ===
+    // 将用户学过的词提到前面，没出现在字典中的也插入
+    let final_cands = {
+        let learned = state.user_dict.get_learned_words(&raw);
+        if learned.is_empty() {
+            final_cands
+        } else {
+            let mut boosted: Vec<String> = Vec::new();
+            // 先放用户学过的词（按学习次数排序）
+            for (word, _count) in &learned {
+                if !boosted.contains(word) {
+                    boosted.push(word.clone());
+                }
+            }
+            // 再放原始候选（去重）
+            for word in &final_cands {
+                if !boosted.contains(word) {
+                    boosted.push(word.clone());
+                }
+            }
+            boosted
         }
     };
 
