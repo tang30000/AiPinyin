@@ -170,9 +170,9 @@ unsafe fn toggle_mode(state: &mut ImeState) {
             send_unicode_text(&raw);
         }
         state.cand_win.hide();
-        eprintln!("[IME] ⌨ 英文模式（直通）");
+        eprintln!("[IME] ⌨  EN → 英文直通（按 Shift 切回中文）");
     } else {
-        eprintln!("[IME] 🀄 中文模式（拦截）");
+        eprintln!("[IME] 🀄 CN → 中文拦截（按 Shift 切回英文）");
     }
 }
 
@@ -218,7 +218,7 @@ unsafe fn send_unicode_text(text: &str) {
 
     if !inputs.is_empty() {
         let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        eprintln!("[IME] 注入 {} 个字符，sent={}", text.chars().count(), sent);
+        eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text, sent);
     }
 }
 
@@ -242,12 +242,11 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     let raw = state.input.engine.raw_input().to_string();
-    eprintln!("[IME] raw={:?}, cands={}", raw, refs.len());
     state.cand_win.update_candidates(&raw, &refs[..count]);
 
     let pt = get_caret_screen_pos();
-    eprintln!("[IME] show at ({}, {})", pt.x, pt.y + 4);
     state.cand_win.show(pt.x, pt.y + 4);
+    eprintln!("[IME] 拼音={:?}  候选={}  位置=({},{})", raw, count, pt.x, pt.y + 4);
 }
 
 /// 多策略获取光标屏幕坐标

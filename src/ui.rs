@@ -344,8 +344,6 @@ impl CandidateWindow {
         let (w, h) = calc_size(hdc, state);
         ReleaseDC(self.hwnd, hdc);
 
-        eprintln!("[UI] calc_size → ({}, {}), cands={}", w, h, state.candidates.len());
-
         if w <= 0 || h <= 0 { return; }
 
         let _ = SetWindowPos(
