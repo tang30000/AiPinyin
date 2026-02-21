@@ -17,6 +17,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_TextServices",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
 ] }
 
 # ONNX 推理引擎 - 加载本地 AI 权重 (暂时注释，等核心框架稳定后再集成)
