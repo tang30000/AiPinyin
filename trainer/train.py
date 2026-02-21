@@ -25,8 +25,12 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.utils.data import Dataset, DataLoader, RandomSampler
+# AMP: 兼容新旧 API
+try:
+    from torch.amp import autocast, GradScaler  # PyTorch 2.9+
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 
 # 添加 trainer 目录到 path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -151,7 +155,7 @@ def train(args):
     print(f"[Train] Device: {device}")
     if device.type == "cuda":
         print(f"[Train] GPU: {torch.cuda.get_device_name()}")
-        print(f"[Train] VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        print(f"[Train] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     # Tokenizer
     vocab_dir = os.path.join(os.path.dirname(__file__), "vocab")
@@ -177,11 +181,19 @@ def train(args):
         print("[Train] ❌ 没有训练数据!")
         return
 
+    # 限制每 epoch 样本数
+    if args.max_samples > 0 and len(dataset) > args.max_samples:
+        sampler = RandomSampler(dataset, num_samples=args.max_samples)
+        print(f"[Train] 限制每 epoch {args.max_samples:,} 样本 (总共 {len(dataset):,})", flush=True)
+    else:
+        sampler = None
+
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
+        shuffle=(sampler is None),
+        sampler=sampler,
+        num_workers=2,
         pin_memory=True,
     )
 
@@ -189,7 +201,8 @@ def train(args):
     model = create_model(py_tok.vocab_size, ch_tok.vocab_size).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_ID)
-    scaler = GradScaler(enabled=(device.type == "cuda"))
+    use_amp = device.type == "cuda"
+    scaler = GradScaler(device.type, enabled=use_amp) if use_amp else None
 
     # 学习率调度
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -200,9 +213,10 @@ def train(args):
     os.makedirs(args.save_dir, exist_ok=True)
     best_loss = float("inf")
 
-    print(f"\n[Train] 开始训练: {args.epochs} epochs, batch={args.batch_size}")
-    print(f"[Train] 样本数: {len(dataset)}, 批次数: {len(loader)}")
-    print()
+    print(f"\n[Train] 开始训练: {args.epochs} epochs, batch={args.batch_size}", flush=True)
+    print(f"[Train] 样本数: {len(dataset)}, 批次数: {len(loader)}", flush=True)
+    print(f"[Train] AMP(FP16): {use_amp}", flush=True)
+    print(flush=True)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -216,21 +230,37 @@ def train(args):
             py = py.to(device)
             target = target.to(device)
 
-            with autocast(enabled=(device.type == "cuda")):
+            if use_amp:
+                with autocast(device.type):
+                    logits = model(py, ctx)
+                    loss = criterion(logits, target)
+                scaler.scale(loss).backward()
+                if (batch_idx + 1) % args.accum_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+            else:
                 logits = model(py, ctx)
                 loss = criterion(logits, target)
-
-            scaler.scale(loss).backward()
-
-            if (batch_idx + 1) % args.accum_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+                loss.backward()
+                if (batch_idx + 1) % args.accum_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
 
             total_loss += loss.item()
             preds = logits.argmax(dim=-1)
             correct += (preds == target).sum().item()
             total += target.size(0)
+
+            # 每 100 批次打印进度
+            if (batch_idx + 1) % 100 == 0:
+                running_loss = total_loss / (batch_idx + 1)
+                running_acc = correct / max(total, 1)
+                elapsed = time.time() - t0
+                eta = elapsed / (batch_idx + 1) * (len(loader) - batch_idx - 1)
+                print(f"  [{batch_idx+1:6d}/{len(loader)}]  "
+                      f"loss={running_loss:.4f}  acc={running_acc:.3f}  "
+                      f"elapsed={elapsed:.0f}s  eta={eta:.0f}s", flush=True)
 
         scheduler.step()
 
@@ -275,5 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--accum_steps", type=int, default=4,
                         help="梯度累积步数 (有效 batch = batch_size × accum_steps)")
     parser.add_argument("--save_dir", type=str, default="trainer/checkpoints")
+    parser.add_argument("--max_samples", type=int, default=500000,
+                        help="每 epoch 最大样本数 (0=全部)")
     args = parser.parse_args()
     train(args)
