@@ -3,6 +3,7 @@
 //! 架构：WH_KEYBOARD_LL 全局键盘钩子 + 多策略光标定位
 
 mod guardian;
+pub mod ai_engine;
 pub mod key_event;
 pub mod pinyin;
 pub mod plugin_system;
@@ -30,7 +31,9 @@ struct ImeState {
     input: InputState,
     cand_win: ui::CandidateWindow,
     plugins: plugin_system::PluginSystem,
-    /// 候选窗口当前显示的候选词（经过插件处理后）
+    ai: ai_engine::AIPredictor,
+    history: ai_engine::HistoryBuffer,
+    /// 候选窗口当前显示的候选词（经过插件+AI处理后）
     current_candidates: Vec<String>,
     chinese_mode: bool,
     shift_down: bool,
@@ -68,11 +71,17 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
     plugins.load_dir(&plugins_dir);
 
+    // 初始化 AI 推理引擎
+    let ai = ai_engine::AIPredictor::new();
+    let history = ai_engine::HistoryBuffer::new(10);
+
     let cand_win = ui::CandidateWindow::new()?;
     let state = Box::new(ImeState {
         input: InputState::new(),
         cand_win,
         plugins,
+        ai,
+        history,
         current_candidates: Vec::new(),
         chinese_mode: true,
         shift_down: false,
@@ -148,6 +157,7 @@ unsafe fn cb_process_key(vkey: u32) {
             if !text.is_empty() {
                 state.cand_win.hide();
                 state.current_candidates.clear();
+                state.history.push(&text);  // 记录上屏历史
                 eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
                     send_unicode_text(&text));
             }
@@ -155,6 +165,7 @@ unsafe fn cb_process_key(vkey: u32) {
         Some(CommitAction::Text(text)) => {
             state.cand_win.hide();
             state.current_candidates.clear();
+            state.history.push(&text);  // 记录上屏历史
             eprintln!("[IME] \u{2191} \u{4e0a}\u{5c4f} {:?}  (sent={})", text,
                 send_unicode_text(&text));
         }
@@ -315,24 +326,27 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     let cands = state.input.engine.get_candidates();
-    // 经过 JS 插件流水线处理
     let refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
     let count = min(9, refs.len());
     if count == 0 { state.cand_win.hide(); return; }
 
     let raw = state.input.engine.raw_input().to_string();
-    let processed = state.plugins.transform_candidates(&raw, cands);
-    let proc_refs: Vec<&str> = processed.iter().map(|s| s.as_str()).collect();
-    let final_count = min(9, proc_refs.len());
 
-    // 缓存当前显示的候选（供 Space/数字上屏用）
-    state.current_candidates = processed[..final_count].to_vec();
+    // 管线: 字典 → 插件 → AI 重排
+    let after_plugins = state.plugins.transform_candidates(&raw, cands);
+    let after_ai = state.ai.rerank(&raw, after_plugins, &state.history);
 
-    state.cand_win.update_candidates(&raw, &proc_refs[..final_count]);
+    let final_refs: Vec<&str> = after_ai.iter().map(|s| s.as_str()).collect();
+    let final_count = min(9, final_refs.len());
+
+    state.current_candidates = after_ai[..final_count].to_vec();
+    state.cand_win.update_candidates(&raw, &final_refs[..final_count]);
 
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
-    eprintln!("[IME] 拼音={:?}  候选={}  位置=({},{})", raw, final_count, pt.x, pt.y + 4);
+    eprintln!("[IME] pinyin={:?}  cands={}  AI={}  pos=({},{})",
+        raw, final_count, if state.ai.is_available() { "ON" } else { "off" },
+        pt.x, pt.y + 4);
 }
 
 /// 多策略获取光标屏幕坐标

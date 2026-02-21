@@ -23,8 +23,9 @@ windows = { version = "0.58", features = [
 ] }
 windows-core = "0.58"
 
-# ONNX 推理引擎 - 加载本地 AI 权重 (暂时注释，等核心框架稳定后再集成)
-# ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
+# ONNX 推理引擎 - AI 模型加载与推理
+ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
+ndarray = "0.15"
 
 # 序列化框架 - 配置 & 模型元数据
 serde = { version = "1", features = ["derive"] }
