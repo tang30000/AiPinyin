@@ -186,9 +186,9 @@ impl AIPredictor {
 
     pub fn model_path(&self) -> &Path { &self.model_path }
 
-    /// AI 主导: 拼音 → 汉字 (Concat 自回归)
+    /// AI 主导: 上下文感知拼音 → 汉字 (Concat 自回归)
     pub fn predict(
-        &mut self, pinyin: &str, _context: &HistoryBuffer, top_k: usize,
+        &mut self, pinyin: &str, context: &HistoryBuffer, top_k: usize,
     ) -> Vec<String> {
         let session = match &mut self.state {
             AIState::Ready(s) => s, _ => return vec![],
@@ -196,7 +196,8 @@ impl AIPredictor {
         let vocab = match &self.vocab {
             Some(v) => v, None => return vec![],
         };
-        match run_predict(session, vocab, pinyin, top_k) {
+        let ctx_str = context.context_string();
+        match run_predict(session, vocab, pinyin, top_k, &ctx_str) {
             Ok(c) => c,
             Err(e) => { eprintln!("[AI] predict: {}", e); vec![] }
         }
@@ -258,30 +259,48 @@ fn run_inference(
     Ok(logits.to_vec())
 }
 
-/// Concat 自回归预测: 拼音 → top-K 汉字短语
+/// 上下文感知 Concat 自回归预测
+///
+/// 输入: [CLS] ctx_char1 ctx_char2 ... [py1] → 预测 char1
+///       [CLS] ctx_char1 ctx_char2 ... [py1] char1 [py2] → 预测 char2
 fn run_predict(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
     pinyin: &str,
     top_k: usize,
+    context: &str,
 ) -> Result<Vec<String>, String> {
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
     if syllables.is_empty() { return Ok(vec![]); }
 
-    // Concat 格式: [CLS] [py1] → 预测char1, [CLS] [py1] char1 [py2] → 预测char2, ...
+    let vocab_size = 21571usize;
 
-    // 第一步: [CLS] [py1] → top-K 首字
+    // 构建上下文前缀: [CLS] ctx_chars...
+    let mut ctx_prefix = vec![vocab.cls_id];
+    let ctx_chars: Vec<char> = context.chars().rev().take(50).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+
+    for ch in &ctx_chars {
+        if let Some(&cid) = vocab.char2id.get(&ch.to_string()) {
+            ctx_prefix.push(cid);
+        }
+    }
+
+    if !ctx_chars.is_empty() {
+        eprintln!("[AI] predict: ctx={}字, pinyin={}", ctx_chars.len(), pinyin);
+    }
+
+    // 第一步: [...ctx] [py1] → top-K 首字
     let py1 = &syllables[0];
     let py1_id = match vocab.pinyin2id.get(py1.as_str()) {
         Some(&id) => id,
-        None => return Ok(vec![]),  // 未知拼音
+        None => return Ok(vec![]),
     };
 
-    let input_ids = vec![vocab.cls_id, py1_id];
+    let mut input_ids = ctx_prefix.clone();
+    input_ids.push(py1_id);
     let logits = run_inference(session, &input_ids)?;
 
-    // 取最后位置的 logits
-    let vocab_size = 21571usize;
     let last_pos = input_ids.len() - 1;
     let offset = last_pos * vocab_size;
     if offset + vocab_size > logits.len() {
@@ -289,7 +308,6 @@ fn run_predict(
     }
     let last_logits = &logits[offset..offset + vocab_size];
 
-    // 拼音约束: 只在 py1 对应的候选汉字中选
     let first_chars = get_top_k_constrained(last_logits, vocab, py1, top_k);
     if first_chars.is_empty() { return Ok(vec![]); }
 
@@ -297,11 +315,13 @@ fn run_predict(
         return Ok(first_chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
-    // 多音节: 对每个首字做贪心续写
+    // 多音节: 对每个首字做贪心续写 (保持上下文前缀)
     let mut results = Vec::new();
     for (first_id, first_ch) in &first_chars {
         let mut phrase = first_ch.clone();
-        let mut current_ids = vec![vocab.cls_id, py1_id, *first_id];
+        let mut current_ids = ctx_prefix.clone();
+        current_ids.push(py1_id);
+        current_ids.push(*first_id);
 
         for syl in syllables.iter().skip(1) {
             let py_id = match vocab.pinyin2id.get(syl.as_str()) {
