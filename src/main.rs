@@ -337,24 +337,23 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 
     let final_cands = if state.ai.ai_first && state.ai.is_available() {
         // === AI 主导模式 ===
-        // AI 直接预测候选, 字典兜底
-        let mut ai_cands = state.ai.predict(&raw, &state.history, state.cfg.ai.top_k);
-        if ai_cands.is_empty() {
-            // AI 无结果 → 回退字典
-            let dict_cands = state.input.engine.get_candidates();
-            state.plugins.transform_candidates(&raw, dict_cands)
-        } else {
-            // AI 有结果, 补充字典候选 (去重)
-            let dict_cands = state.input.engine.get_candidates();
-            let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
-            for d in dict_after {
-                if !ai_cands.contains(&d) {
-                    ai_cands.push(d);
-                }
-                if ai_cands.len() >= 9 { break; }
+        // 前 N 位 AI 预测, 后面字典补充
+        let ai_slots = std::cmp::min(state.cfg.ai.top_k, 3); // AI 占前3位
+        let ai_cands = state.ai.predict(&raw, &state.history, ai_slots);
+
+        // 字典候选
+        let dict_cands = state.input.engine.get_candidates();
+        let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
+
+        // 合并: AI 在前, 字典补后 (去重)
+        let mut merged = ai_cands;
+        for d in dict_after {
+            if !merged.contains(&d) {
+                merged.push(d);
             }
-            ai_cands
+            if merged.len() >= 9 { break; }
         }
+        merged
     } else {
         // === 字典主导模式 ===
         // 字典 → 插件 → AI 重排
