@@ -22,6 +22,11 @@ use crate::key_event::{InputState, CommitAction, handle_key_down};
 
 /// 自定义消息: 钩子先拦截按键，然后通过此消息异步处理
 const WM_IME_KEYDOWN: u32 = WM_APP + 1;
+/// 自定义消息: AI 后台线程完成推理, 通知主线程更新候选
+const WM_AI_RESULT: u32 = WM_APP + 2;
+
+/// AI 线程存放结果, 主线程读取
+static mut AI_RESULT: Option<(u64, String, Vec<String>)> = None;
 
 pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150445bcde);
 
@@ -404,7 +409,7 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     if state.ai.ai_first && state.ai.is_available() {
         let raw_clone = raw.clone();
         let dict_clone = dict_after;
-        let hwnd = state.cand_win.hwnd();
+        let hwnd_raw = state.cand_win.hwnd().0 as isize;  // HWND is !Send, pass as raw
         let ctx_str = state.history.context_string();
         let ai_top_k = std::cmp::min(state.cfg.ai.top_k, 5);
 
@@ -413,8 +418,6 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         let gen = state.ai_generation;
 
         std::thread::spawn(move || {
-            // 在新线程中做 AI 推理 (这里不能直接访问 state)
-            // 需要通过全局状态访问 AI predictor
             let state_ptr = GLOBAL_STATE;
             if state_ptr.is_null() { return; }
             let state = &mut *state_ptr;
@@ -423,19 +426,16 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
                 &raw_clone, &state.history, ai_top_k, &dict_clone,
             );
 
-            // 如果 generation 已变 (用户又输入了新的), 丢弃结果
+            // 如果 generation 已变, 丢弃过期结果
             if state.ai_generation != gen { return; }
 
-            // 合并 AI 排序结果 + 字典兜底
+            // 合并 AI + 字典
             let mut merged = Vec::new();
             let mut seen = std::collections::HashSet::new();
-
-            // 用户自学习先
             let learned = state.user_dict.get_learned_words(&raw_clone);
             for (word, _) in &learned {
                 if seen.insert(word.clone()) { merged.push(word.clone()); }
             }
-
             for w in &ai_scored {
                 if seen.insert(w.clone()) { merged.push(w.clone()); }
             }
@@ -444,13 +444,10 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
                 if merged.len() >= 15 { break; }
             }
 
-            let count = std::cmp::min(9, merged.len());
-            if count == 0 { return; }
-
-            state.current_candidates = merged[..count].to_vec();
-            let refs: Vec<&str> = state.current_candidates.iter()
-                .map(|s| s.as_str()).collect();
-            state.cand_win.update_candidates(&raw_clone, &refs);
+            // 存结果, PostMessage 通知主线程 (UI 操作只能在主线程)
+            AI_RESULT = Some((gen, raw_clone, merged));
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
         });
     }
 

@@ -512,6 +512,27 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // AI 后台线程完成推理, 在主线程安全更新 UI
+        x if x == crate::WM_AI_RESULT => {
+            if let Some((gen, raw, merged)) = crate::AI_RESULT.take() {
+                let state_ptr = crate::GLOBAL_STATE;
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    // 只有 generation 匹配才应用 (用户没有继续打字)
+                    if state.ai_generation == gen {
+                        let count = std::cmp::min(9, merged.len());
+                        if count > 0 {
+                            state.current_candidates = merged[..count].to_vec();
+                            let refs: Vec<&str> = state.current_candidates.iter()
+                                .map(|s| s.as_str()).collect();
+                            state.cand_win.update_candidates(&raw, &refs);
+                            eprintln!("[AI] 异步更新候选: {:?}", &state.current_candidates[..std::cmp::min(3, count)]);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
