@@ -122,11 +122,13 @@ impl VocabIndex {
     }
 }
 
-/// AI 候选词重排器
+/// AI 候选词引擎
 pub struct AIPredictor {
     state: AIState,
     vocab: Option<VocabIndex>,
     model_path: PathBuf,
+    /// true = AI 主导出词, false = 字典出词 + AI 重排
+    pub ai_first: bool,
 }
 
 impl AIPredictor {
@@ -141,6 +143,7 @@ impl AIPredictor {
                     state: AIState::Unavailable("ort panic (missing onnxruntime.dll?)".into()),
                     vocab: None,
                     model_path: PathBuf::new(),
+                    ai_first: false,
                 }
             }
         }
@@ -151,6 +154,17 @@ impl AIPredictor {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+        // 设置 ORT_DYLIB_PATH: ort load-dynamic 需要知道 onnxruntime.dll 位置
+        if std::env::var("ORT_DYLIB_PATH").is_err() {
+            if let Some(dir) = &exe_dir {
+                let dll_path = dir.join("onnxruntime.dll");
+                if dll_path.exists() {
+                    eprintln!("[AI] 设置 ORT_DYLIB_PATH={:?}", dll_path);
+                    std::env::set_var("ORT_DYLIB_PATH", &dll_path);
+                }
+            }
+        }
 
         // 加载词表
         let vocab = exe_dir.as_ref().and_then(|d| VocabIndex::load_from_dir(d));
@@ -173,10 +187,13 @@ impl AIPredictor {
             }
         };
 
+        let ai_first = matches!(&state, AIState::Ready(_));
+
         Self {
             state,
             vocab,
             model_path: model_path.unwrap_or_default(),
+            ai_first,
         }
     }
 
@@ -187,7 +204,36 @@ impl AIPredictor {
     pub fn model_path(&self) -> &Path {
         &self.model_path
     }
-    /// 重排候选词: 字典候选 → AI 语义重排
+
+    /// AI 主导模式: 直接由模型预测汉字 (自回归, 逐字解码)
+    ///
+    /// 输入: 拼音字符串 (如 "nihao")
+    /// 输出: top-K 候选短语 (如 ["你好", "尼好", ...])
+    pub fn predict(
+        &mut self,
+        pinyin: &str,
+        context: &HistoryBuffer,
+        top_k: usize,
+    ) -> Vec<String> {
+        let session = match &mut self.state {
+            AIState::Ready(s) => s,
+            AIState::Unavailable(_) => return vec![],
+        };
+        let vocab = match &self.vocab {
+            Some(v) => v,
+            None => return vec![],
+        };
+
+        match run_predict(session, vocab, pinyin, context, top_k) {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                eprintln!("[AI] predict error: {}", e);
+                vec![]
+            }
+        }
+    }
+
+    /// 字典辅助模式: 字典候选 → AI 语义重排
     pub fn rerank(
         &mut self,
         pinyin: &str,
@@ -275,6 +321,109 @@ fn run_inference(
     }).collect();
 
     Ok(scores)
+}
+
+/// AI 主导预测: 拼音 → 汉字短语 (自回归逐字解码)
+///
+/// 对每个拼音音节位置运行一次推理, 取 top-K 候选字.
+/// 第一个音节取 top_k 个候选, 后续音节对每条路径取 top-1 (贪心), 组成短语.
+fn run_predict(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    pinyin: &str,
+    context: &HistoryBuffer,
+    top_k: usize,
+) -> Result<Vec<String>, String> {
+    let syllables = crate::pinyin::split_pinyin_pub(pinyin);
+    if syllables.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let ctx_str = context.context_string();
+
+    // 第一个音节: 取 top_k 候选字
+    let first_chars = predict_one_char(session, vocab, &syllables[0], &ctx_str, top_k)?;
+    if first_chars.is_empty() {
+        return Ok(vec![]);
+    }
+
+    if syllables.len() == 1 {
+        // 单音节: 直接返回单字候选
+        return Ok(first_chars.into_iter().map(|(ch, _)| ch).collect());
+    }
+
+    // 多音节: 对每个 first_char 做贪心续写
+    let mut results = Vec::new();
+    for (first_ch, _score) in &first_chars {
+        let mut phrase = first_ch.clone();
+        let mut running_ctx = format!("{}{}", ctx_str, first_ch);
+
+        for syl in syllables.iter().skip(1) {
+            let next = predict_one_char(session, vocab, syl, &running_ctx, 1)?;
+            if let Some((ch, _)) = next.first() {
+                phrase.push_str(ch);
+                running_ctx.push_str(ch);
+            }
+        }
+        results.push(phrase);
+    }
+
+    // 去重
+    let mut seen = std::collections::HashSet::new();
+    results.retain(|s| seen.insert(s.clone()));
+
+    Ok(results)
+}
+
+/// 单字预测: 给定一个音节 + 上下文, 返回 top-K (字, 分数)
+fn predict_one_char(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    syllable: &str,
+    context: &str,
+    top_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    // 编码拼音 (单音节)
+    let mut py_ids = vec![0i64; vocab.max_pinyin_len];
+    py_ids[0] = *vocab.pinyin2id.get(syllable).unwrap_or(&1);
+
+    // 编码上下文
+    let mut ctx_ids = vec![0i64; vocab.max_context_len];
+    for (i, ch) in context.chars().rev().enumerate().take(vocab.max_context_len) {
+        let idx = vocab.max_context_len - 1 - i;
+        ctx_ids[idx] = *vocab.char2id.get(&ch.to_string()).unwrap_or(&1);
+    }
+
+    // 推理
+    let py_value = ort::value::Tensor::from_array(
+        ([1usize, vocab.max_pinyin_len], py_ids)
+    ).map_err(|e| format!("py tensor: {}", e))?;
+    let ctx_value = ort::value::Tensor::from_array(
+        ([1usize, vocab.max_context_len], ctx_ids)
+    ).map_err(|e| format!("ctx tensor: {}", e))?;
+
+    let outputs = session.run(ort::inputs![py_value, ctx_value])
+        .map_err(|e| format!("session.run: {}", e))?;
+
+    let (_shape, logits) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("extract: {}", e))?;
+
+    // 取 top-K (跳过特殊 token: PAD=0, UNK=1, BOS=2, EOS=3)
+    let mut scored: Vec<(i64, f32)> = logits.iter().enumerate()
+        .filter(|(i, _)| *i >= 4)  // 跳过特殊 token
+        .map(|(i, &s)| (i as i64, s))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let result: Vec<(String, f32)> = scored.iter()
+        .take(top_k)
+        .filter_map(|(id, score)| {
+            vocab.id2char.get(id).map(|ch| (ch.clone(), *score))
+        })
+        .collect();
+
+    Ok(result)
 }
 
 

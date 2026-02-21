@@ -9,7 +9,7 @@ pub mod pinyin;
 pub mod plugin_system;
 pub mod ui;
 
-use std::cmp::min;
+
 use anyhow::Result;
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -325,28 +325,48 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         return;
     }
 
-    let cands = state.input.engine.get_candidates();
-    let refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
-    let count = min(9, refs.len());
-    if count == 0 { state.cand_win.hide(); return; }
-
     let raw = state.input.engine.raw_input().to_string();
 
-    // 管线: 字典 → 插件 → AI 重排
-    let after_plugins = state.plugins.transform_candidates(&raw, cands);
-    let after_ai = state.ai.rerank(&raw, after_plugins, &state.history);
+    let final_cands = if state.ai.ai_first && state.ai.is_available() {
+        // === AI 主导模式 ===
+        // AI 直接预测候选, 字典兜底
+        let mut ai_cands = state.ai.predict(&raw, &state.history, 9);
+        if ai_cands.is_empty() {
+            // AI 无结果 → 回退字典
+            let dict_cands = state.input.engine.get_candidates();
+            state.plugins.transform_candidates(&raw, dict_cands)
+        } else {
+            // AI 有结果, 补充字典候选 (去重)
+            let dict_cands = state.input.engine.get_candidates();
+            let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
+            for d in dict_after {
+                if !ai_cands.contains(&d) {
+                    ai_cands.push(d);
+                }
+                if ai_cands.len() >= 9 { break; }
+            }
+            ai_cands
+        }
+    } else {
+        // === 字典主导模式 ===
+        // 字典 → 插件 → AI 重排
+        let cands = state.input.engine.get_candidates();
+        let after_plugins = state.plugins.transform_candidates(&raw, cands);
+        state.ai.rerank(&raw, after_plugins, &state.history)
+    };
 
-    let final_refs: Vec<&str> = after_ai.iter().map(|s| s.as_str()).collect();
-    let final_count = min(9, final_refs.len());
+    let count = std::cmp::min(9, final_cands.len());
+    if count == 0 { state.cand_win.hide(); return; }
 
-    state.current_candidates = after_ai[..final_count].to_vec();
-    state.cand_win.update_candidates(&raw, &final_refs[..final_count]);
+    state.current_candidates = final_cands[..count].to_vec();
+    let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
+    state.cand_win.update_candidates(&raw, &refs);
 
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
-    eprintln!("[IME] pinyin={:?}  cands={}  AI={}  pos=({},{})",
-        raw, final_count, if state.ai.is_available() { "ON" } else { "off" },
-        pt.x, pt.y + 4);
+    let mode = if state.ai.ai_first { "AI主导" } else { "字典+AI" };
+    eprintln!("[IME] pinyin={:?}  cands={}  mode={}  pos=({},{})",
+        raw, count, mode, pt.x, pt.y + 4);
 }
 
 /// 多策略获取光标屏幕坐标
