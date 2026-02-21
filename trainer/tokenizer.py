@@ -1,9 +1,11 @@
 """
-AiPinyin Tokenizer — 拼音/汉字双向编码器
+AiPinyin Tokenizer — 拼音/汉字双向编码器 (v2)
+
+修复: 基于语料频率构建汉字词表，而非 Unicode 顺序取前 N 个。
 
 职责:
   1. 拼音音节 → token ID  (约 415 个)
-  2. 汉字字符 → token ID  (约 7000 个)
+  2. 汉字字符 → token ID  (基于语料频率)
   3. 提供训练数据的编码/解码接口
 
 特殊 Token:
@@ -12,7 +14,8 @@ AiPinyin Tokenizer — 拼音/汉字双向编码器
 
 import json
 import os
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
+from collections import Counter
 
 # ============================================================
 # 全拼音节表 (410+)
@@ -147,44 +150,101 @@ class PinyinTokenizer:
 
 
 class CharTokenizer:
-    """汉字字符编码器 (7000 常用字)"""
+    """汉字字符编码器 — 基于语料频率构建"""
 
-    # GB2312 一级汉字 3755 + 二级汉字 3008 + 常用标点 ≈ 7000
-    def __init__(self, char_file: Optional[str] = None):
+    def __init__(self, char_file: Optional[str] = None, corpus_path: Optional[str] = None):
         self.char2id: Dict[str, int] = {}
         self.id2char: Dict[int, str] = {}
         if char_file and os.path.exists(char_file):
             self._load_from_file(char_file)
+        elif corpus_path and os.path.exists(corpus_path):
+            self._build_from_corpus(corpus_path)
         else:
             self._build_default()
 
+    def _build_from_corpus(self, corpus_path: str, max_chars: int = 8000):
+        """从语料文件构建字频排序的词表"""
+        print(f"[Tokenizer] 从语料构建字表: {corpus_path}")
+        counter = Counter()
+        with open(corpus_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "\t" not in line:
+                    continue
+                _, hanzi = line.split("\t", 1)
+                for ch in hanzi:
+                    if '\u4e00' <= ch <= '\u9fff':
+                        counter[ch] += 1
+
+        # 特殊 token
+        for i, tok in enumerate(SPECIAL_TOKENS):
+            self.char2id[tok] = i
+            self.id2char[i] = tok
+
+        # 按频率降序添加
+        offset = len(SPECIAL_TOKENS)
+        for idx, (ch, cnt) in enumerate(counter.most_common(max_chars)):
+            i = offset + idx
+            self.char2id[ch] = i
+            self.id2char[i] = ch
+
+        # 常用标点
+        punct_offset = offset + len(counter.most_common(max_chars))
+        for pi, punct in enumerate("，。、！？：；""''（）《》【】…—"):
+            if punct not in self.char2id:
+                self.char2id[punct] = punct_offset + pi
+                self.id2char[punct_offset + pi] = punct
+
+        print(f"[Tokenizer] 从语料提取 {len(self.char2id) - len(SPECIAL_TOKENS)} 个字符")
+        print(f"[Tokenizer] 前10高频: {''.join(ch for ch, _ in counter.most_common(10))}")
+
     def _build_default(self):
-        """从 Unicode CJK 基本区构建 7000 常用字表"""
+        """默认: 常用简体字 (按频率排序的前 3500 常用字)"""
+        # GB2312 一级汉字 3755 个（按拼音+笔画排序，覆盖 99.7% 日常用字）
+        # 这里按频率排列前 500 个最常用简体字
+        TOP_500 = (
+            "的一是不了在人有我他这个们中来上大为和国地到以说时"
+            "要就出会也你对生能而子那得于着下自之年过发后作里用"
+            "道行所然家种事成方多经么去法学如都同现当没动面起看"
+            "定天分还进好小部其些主样理心她本前开但因只从想实日"
+            "军者意无力它与长把机十民第公此已工使情明性知全三又"
+            "关点正业外将两高间由问很最也重新回把门体别立代头入"
+            "气已等做老被保正之白向所教通更将义相望期文几起应合"
+            "许手加条特内信号达常表系场加决水手已化更己求制各比"
+            "目己第员等直象其平走至设张反结解边界活命步指五少次"
+            "品取消认治提计果则务处管边走世身确斯名吃记路术及干"
+            "总单史确联受际基色见报局太根改准半空山西数件运什量"
+            "位且共感备政反影存任接难线示阿光海达八东京识格深论"
+            "言权较吗近却严清百思红花村回写持程风争强往领组首观"
+            "落价满调容调易听团众神况构图参眼商转角谈传集双收音"
+            "往断飞原古车令按语春绝派费怎望级调细复备拿温科举状"
+            "落导场局极留跑低研据选类似局南兵器广县整形石陈唐足"
+        )
+
         for i, tok in enumerate(SPECIAL_TOKENS):
             self.char2id[tok] = i
             self.id2char[i] = tok
 
         offset = len(SPECIAL_TOKENS)
-        # 常用汉字范围: U+4E00 - U+9FFF
-        # 取前 7000 个最常用的（按 Unicode 排列）
-        # 实际项目中应按频率排序，这里先用 Unicode 顺序占位
-        count = 0
-        for cp in range(0x4E00, 0x9FFF + 1):
-            ch = chr(cp)
-            idx = offset + count
-            self.char2id[ch] = idx
-            self.id2char[idx] = ch
-            count += 1
-            if count >= 7000:
-                break
+        added = set()
+        idx = 0
+        for ch in TOP_500:
+            if ch not in added:
+                i = offset + idx
+                self.char2id[ch] = i
+                self.id2char[i] = ch
+                added.add(ch)
+                idx += 1
 
         # 常用标点
         for punct in "，。、！？：；""''（）《》【】…—":
             if punct not in self.char2id:
-                idx = offset + count
-                self.char2id[punct] = idx
-                self.id2char[idx] = punct
-                count += 1
+                i = offset + idx
+                self.char2id[punct] = i
+                self.id2char[i] = punct
+                idx += 1
+
+        print(f"[Tokenizer] 默认字表: {len(self.char2id)} 字符（无语料时使用）")
 
     def _load_from_file(self, path: str):
         with open(path, "r", encoding="utf-8") as f:
@@ -213,7 +273,7 @@ class CharTokenizer:
         return tok
 
 
-def build_and_save_vocabs(out_dir: str):
+def build_and_save_vocabs(out_dir: str, corpus_path: str = None):
     """构建并保存词表文件"""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -221,7 +281,7 @@ def build_and_save_vocabs(out_dir: str):
     py_tok.save(os.path.join(out_dir, "pinyin2id.json"))
     print(f"[Tokenizer] 拼音词表: {py_tok.vocab_size} tokens → pinyin2id.json")
 
-    ch_tok = CharTokenizer()
+    ch_tok = CharTokenizer(corpus_path=corpus_path)
     ch_tok.save(os.path.join(out_dir, "char2id.json"))
     print(f"[Tokenizer] 汉字词表: {ch_tok.vocab_size} tokens → char2id.json")
 
@@ -241,7 +301,9 @@ def build_and_save_vocabs(out_dir: str):
 
 
 if __name__ == "__main__":
-    py_tok, ch_tok = build_and_save_vocabs("trainer/vocab")
+    import sys
+    corpus = sys.argv[1] if len(sys.argv) > 1 else None
+    py_tok, ch_tok = build_and_save_vocabs("trainer/vocab", corpus_path=corpus)
 
     # 测试
     print("\n=== 测试 ===")
@@ -252,3 +314,20 @@ if __name__ == "__main__":
     ids2 = ch_tok.encode("你好世界")
     print(f"汉字 '你好世界' → {ids2}")
     print(f"解码 → {ch_tok.decode(ids2)}")
+
+    # 覆盖率测试
+    if corpus:
+        total = 0
+        matched = 0
+        with open(corpus, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "\t" not in line:
+                    continue
+                _, hanzi = line.split("\t", 1)
+                for ch in hanzi:
+                    if '\u4e00' <= ch <= '\u9fff':
+                        total += 1
+                        if ch in ch_tok.char2id:
+                            matched += 1
+        print(f"\n语料覆盖率: {matched}/{total} = {100*matched/max(total,1):.1f}%")

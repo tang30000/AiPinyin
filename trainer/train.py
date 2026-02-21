@@ -157,10 +157,12 @@ def train(args):
         print(f"[Train] GPU: {torch.cuda.get_device_name()}")
         print(f"[Train] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
-    # Tokenizer
+    # Tokenizer — 从语料构建字表
     vocab_dir = os.path.join(os.path.dirname(__file__), "vocab")
     py_tok = PinyinTokenizer()
-    ch_tok = CharTokenizer()
+    # 关键: 从语料构建字频词表, 而非 Unicode 顺序
+    data_path = args.data if os.path.exists(args.data) else None
+    ch_tok = CharTokenizer(corpus_path=data_path)
 
     # 保存词表
     os.makedirs(vocab_dir, exist_ok=True)

@@ -131,7 +131,22 @@ pub struct AIPredictor {
 
 impl AIPredictor {
     /// 尝试加载模型 + 词表，失败时静默回退
+    /// 使用 catch_unwind 防止 ort load-dynamic 找不到 DLL 时 panic 导致闪退
     pub fn new() -> Self {
+        match std::panic::catch_unwind(|| Self::try_init()) {
+            Ok(predictor) => predictor,
+            Err(_) => {
+                eprintln!("[AI] ⚠ ort 初始化 panic (可能缺少 onnxruntime.dll), 回退字典模式");
+                Self {
+                    state: AIState::Unavailable("ort panic (missing onnxruntime.dll?)".into()),
+                    vocab: None,
+                    model_path: PathBuf::new(),
+                }
+            }
+        }
+    }
+
+    fn try_init() -> Self {
         let model_path = find_model_path();
         let exe_dir = std::env::current_exe()
             .ok()
