@@ -196,9 +196,10 @@ impl AIPredictor {
 
     pub fn model_path(&self) -> &Path { &self.model_path }
 
-    /// AI 主导: 上下文感知拼音 → 汉字 (Concat 自回归)
+    /// AI 主导: 字典引导的上下文感知预测
     pub fn predict(
         &mut self, pinyin: &str, context: &HistoryBuffer, top_k: usize,
+        dict_words: &[String],
     ) -> Vec<String> {
         let session = match &mut self.state {
             AIState::Ready(s) => s, _ => return vec![],
@@ -207,7 +208,7 @@ impl AIPredictor {
             Some(v) => v, None => return vec![],
         };
         let ctx_str = context.context_string();
-        match run_predict(session, vocab, pinyin, top_k, &ctx_str) {
+        match run_predict(session, vocab, pinyin, top_k, &ctx_str, dict_words) {
             Ok(c) => c,
             Err(e) => { eprintln!("[AI] predict: {}", e); vec![] }
         }
@@ -293,60 +294,172 @@ fn build_concat_context(vocab: &VocabIndex, context: &str) -> Vec<i64> {
     ids
 }
 
-/// 上下文感知 Concat 自回归预测
+/// 字典引导 Beam Search
 ///
-/// 输入: [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... [py1] → 预测 char1
-///       [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... [py1] char1 [py2] → 预测 char2
+/// 不盲目生成随机字组合, 而是:
+///   1. 从字典候选中提取实际词组 (保证是真词)
+///   2. 用 AI 模型对每个词组做完整序列评分 (上下文感知)
+///   3. 按总分排序, 返回 top-K
 fn run_predict(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
     pinyin: &str,
     top_k: usize,
     context: &str,
+    dict_words: &[String],
 ) -> Result<Vec<String>, String> {
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
     if syllables.is_empty() { return Ok(vec![]); }
 
     let vocab_size = 21571usize;
-
-    // 构建上下文前缀: [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... (Concat 训练格式)
     let ctx_prefix = build_concat_context(vocab, context);
-    let ctx_len = (ctx_prefix.len() - 1) / 2;  // 每个字占 2 个 token
+    let ctx_len = (ctx_prefix.len() - 1) / 2;
 
     if ctx_len > 0 {
-        eprintln!("[AI] predict: ctx={}字(Concat), pinyin={}", ctx_len, pinyin);
+        eprintln!("[AI] predict: ctx={}字(Concat), pinyin={}, dict_words={}",
+            ctx_len, pinyin, dict_words.len());
     }
 
-    // 第一步: [...ctx] [py1] → top-K 首字
-    let py1 = &syllables[0];
-    let py1_id = match vocab.pinyin2id.get(py1.as_str()) {
-        Some(&id) => id,
-        None => return Ok(vec![]),
-    };
+    // === 单音节: 直接拼音约束 top-K ===
+    if syllables.len() == 1 {
+        let py1 = &syllables[0];
+        let py1_id = match vocab.pinyin2id.get(py1.as_str()) {
+            Some(&id) => id, None => return Ok(vec![]),
+        };
+        let mut input_ids = ctx_prefix.clone();
+        input_ids.push(py1_id);
+        let logits = run_inference(session, &input_ids)?;
+        let last_pos = input_ids.len() - 1;
+        let offset = last_pos * vocab_size;
+        if offset + vocab_size > logits.len() { return Err("logits too short".into()); }
+        let last_logits = &logits[offset..offset + vocab_size];
+        let chars = get_top_k_constrained(last_logits, vocab, py1, top_k);
+        return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
+    }
 
+    // === 多音节: 字典引导评分 ===
+    // 只评估字典中字数 == 音节数的词组
+    let target_len = syllables.len();
+    let candidates: Vec<&String> = dict_words.iter()
+        .filter(|w| w.chars().count() == target_len)
+        .take(20)  // 最多评估20个候选
+        .collect();
+
+    if candidates.is_empty() {
+        // 无字典候选, 回退到老的贪心生成
+        return run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k);
+    }
+
+    // 对每个候选词组做完整序列评分
+    let mut scored: Vec<(String, f32)> = Vec::new();
+
+    // 第一步: 一次推理获取所有首字分数
+    let py1_id = match vocab.pinyin2id.get(syllables[0].as_str()) {
+        Some(&id) => id, None => return Ok(vec![]),
+    };
     let mut input_ids = ctx_prefix.clone();
     input_ids.push(py1_id);
-    let logits = run_inference(session, &input_ids)?;
+    let logits1 = run_inference(session, &input_ids)?;
+    let offset1 = (input_ids.len() - 1) * vocab_size;
 
-    let last_pos = input_ids.len() - 1;
-    let offset = last_pos * vocab_size;
-    if offset + vocab_size > logits.len() {
-        return Err("logits too short".into());
+    // 收集所有需要评估的独特首字
+    let mut first_chars_needed: std::collections::HashMap<String, (i64, f32)> = std::collections::HashMap::new();
+    for word in &candidates {
+        if let Some(first_ch) = word.chars().next() {
+            let ch_str = first_ch.to_string();
+            if !first_chars_needed.contains_key(&ch_str) {
+                if let Some(&cid) = vocab.char2id.get(&ch_str) {
+                    let score = if offset1 + cid as usize >= logits1.len() { -50.0 }
+                                else { logits1[offset1 + cid as usize] };
+                    first_chars_needed.insert(ch_str, (cid, score));
+                }
+            }
+        }
     }
-    let last_logits = &logits[offset..offset + vocab_size];
 
-    let first_chars = get_top_k_constrained(last_logits, vocab, py1, top_k);
+    // 第二步+: 对每个独特首字, 计算后续字母分数
+    for word in &candidates {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() != target_len { continue; }
+
+        let first_ch_str = chars[0].to_string();
+        let (first_id, first_score) = match first_chars_needed.get(&first_ch_str) {
+            Some(v) => *v, None => continue,
+        };
+
+        let mut total = first_score;
+        let mut valid = true;
+        let mut cur_ids = input_ids.clone();
+        cur_ids.push(first_id);
+
+        for i in 1..target_len {
+            let syl = &syllables[i];
+            let py_id = match vocab.pinyin2id.get(syl.as_str()) {
+                Some(&id) => id, None => { valid = false; break; }
+            };
+            cur_ids.push(py_id);
+
+            let logits = run_inference(session, &cur_ids)?;
+            let lp = (cur_ids.len() - 1) * vocab_size;
+            let ch_str = chars[i].to_string();
+            let ch_score = vocab.char2id.get(&ch_str)
+                .and_then(|&cid| { let p = lp + cid as usize; if p < logits.len() { Some(logits[p]) } else { None } })
+                .unwrap_or(-50.0);
+            total += ch_score;
+            cur_ids.push(vocab.char2id.get(&ch_str).copied().unwrap_or(vocab.unk_id));
+        }
+
+        if valid {
+            scored.push((word.to_string(), total));
+        }
+    }
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let result: Vec<String> = scored.into_iter().take(top_k).map(|(w, _)| w).collect();
+
+    // 如果字典引导结果不足, 用贪心生成补充
+    if result.len() < top_k {
+        let mut r = result;
+        match run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k) {
+            Ok(greedy) => {
+                for g in greedy {
+                    if !r.contains(&g) { r.push(g); }
+                    if r.len() >= top_k { break; }
+                }
+            }
+            Err(_) => {}
+        }
+        Ok(r)
+    } else {
+        Ok(result)
+    }
+}
+
+/// 贪心生成 (回退方案, 无字典引导)
+fn run_predict_greedy(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    syllables: &[String],
+    ctx_prefix: &[i64],
+    vocab_size: usize,
+    top_k: usize,
+) -> Result<Vec<String>, String> {
+    let py1 = &syllables[0];
+    let py1_id = match vocab.pinyin2id.get(py1.as_str()) {
+        Some(&id) => id, None => return Ok(vec![]),
+    };
+    let mut input_ids = ctx_prefix.to_vec();
+    input_ids.push(py1_id);
+    let logits = run_inference(session, &input_ids)?;
+    let offset = (input_ids.len() - 1) * vocab_size;
+    if offset + vocab_size > logits.len() { return Err("logits too short".into()); }
+    let first_chars = get_top_k_constrained(&logits[offset..offset + vocab_size], vocab, py1, top_k);
     if first_chars.is_empty() { return Ok(vec![]); }
 
-    if syllables.len() == 1 {
-        return Ok(first_chars.into_iter().map(|(_, ch)| ch).collect());
-    }
-
-    // 多音节: 对每个首字做贪心续写 (保持上下文前缀)
     let mut results = Vec::new();
     for (first_id, first_ch) in &first_chars {
         let mut phrase = first_ch.clone();
-        let mut current_ids = ctx_prefix.clone();
+        let mut current_ids = ctx_prefix.to_vec();
         current_ids.push(py1_id);
         current_ids.push(*first_id);
 

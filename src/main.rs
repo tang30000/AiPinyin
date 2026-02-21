@@ -368,38 +368,26 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 
     let final_cands = if state.ai.ai_first && state.ai.is_available() {
         // === AI + 字典协作模式 ===
-        // 1. 字典出实际词组 (保证质量)
+        // 1. 字典出候选词组 (保证是真词)
         let dict_cands = state.input.engine.get_candidates();
-        let dict_set: std::collections::HashSet<String> = dict_cands.iter().cloned().collect();
         let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
 
-        // 2. AI 预测 (可能生成非词组合如"谷几")
+        // 2. AI 对字典候选做完整序列评分 (上下文感知)
+        //    输入 guji + 字典词[估计,古迹,...] → AI 评分排序 → [估计(高分), 古迹, ...]
         let ai_slots = std::cmp::min(state.cfg.ai.top_k, 5);
-        let ai_cands = state.ai.predict(&raw, &state.history, ai_slots);
+        let ai_scored = state.ai.predict(&raw, &state.history, ai_slots, &dict_after);
 
-        // 3. 过滤: 只保留字典里存在的 AI 候选 (去掉"谷几""和休"之类的垃圾)
-        //    单字不过滤 (单字不需要验证)
-        let ai_verified: Vec<String> = ai_cands.into_iter()
-            .filter(|w| w.chars().count() <= 1 || dict_set.contains(w))
-            .collect();
-
-        // 4. 合并: AI 验证过的词在前, 字典其余词补后, 去重
+        // 3. 合并: AI 排序的在前, 字典兜底补后, 去重
         let mut merged = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for w in &ai_verified {
+        for w in &ai_scored {
             if seen.insert(w.clone()) { merged.push(w.clone()); }
         }
         for w in &dict_after {
             if seen.insert(w.clone()) { merged.push(w.clone()); }
             if merged.len() >= 15 { break; }
         }
-
-        // 5. AI rerank 最终排序
-        if state.cfg.ai.rerank {
-            state.ai.rerank(&raw, merged, &state.history)
-        } else {
-            merged
-        }
+        merged
     } else {
         // === 字典主导模式 ===
         let cands = state.input.engine.get_candidates();
