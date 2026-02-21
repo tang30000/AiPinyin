@@ -367,29 +367,39 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     let raw = state.input.engine.raw_input().to_string();
 
     let final_cands = if state.ai.ai_first && state.ai.is_available() {
-        // === AI 主导模式 ===
-        // 前 N 位 AI 预测, 后面字典补充
-        let ai_slots = std::cmp::min(state.cfg.ai.top_k, 3); // AI 占前3位
+        // === AI + 字典协作模式 ===
+        // 1. 字典出实际词组 (保证质量)
+        let dict_cands = state.input.engine.get_candidates();
+        let dict_set: std::collections::HashSet<String> = dict_cands.iter().cloned().collect();
+        let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
+
+        // 2. AI 预测 (可能生成非词组合如"谷几")
+        let ai_slots = std::cmp::min(state.cfg.ai.top_k, 5);
         let ai_cands = state.ai.predict(&raw, &state.history, ai_slots);
 
-        // 字典候选 (是否 AI 重排取决于配置)
-        let dict_cands = state.input.engine.get_candidates();
-        let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
-        let dict_ranked = if state.cfg.ai.rerank {
-            state.ai.rerank(&raw, dict_after, &state.history)
-        } else {
-            dict_after
-        };
+        // 3. 过滤: 只保留字典里存在的 AI 候选 (去掉"谷几""和休"之类的垃圾)
+        //    单字不过滤 (单字不需要验证)
+        let ai_verified: Vec<String> = ai_cands.into_iter()
+            .filter(|w| w.chars().count() <= 1 || dict_set.contains(w))
+            .collect();
 
-        // 合并: AI 在前, 字典补后 (去重)
-        let mut merged = ai_cands;
-        for d in dict_ranked {
-            if !merged.contains(&d) {
-                merged.push(d);
-            }
-            if merged.len() >= 9 { break; }
+        // 4. 合并: AI 验证过的词在前, 字典其余词补后, 去重
+        let mut merged = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for w in &ai_verified {
+            if seen.insert(w.clone()) { merged.push(w.clone()); }
         }
-        merged
+        for w in &dict_after {
+            if seen.insert(w.clone()) { merged.push(w.clone()); }
+            if merged.len() >= 15 { break; }
+        }
+
+        // 5. AI rerank 最终排序
+        if state.cfg.ai.rerank {
+            state.ai.rerank(&raw, merged, &state.history)
+        } else {
+            merged
+        }
     } else {
         // === 字典主导模式 ===
         let cands = state.input.engine.get_candidates();
