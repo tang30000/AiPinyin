@@ -57,6 +57,8 @@ pub struct VocabIndex {
     pub pinyin2char: HashMap<String, Vec<String>>,
     /// 拼音 → 候选汉字 token IDs (预计算)
     pub pinyin2char_ids: HashMap<String, Vec<i64>>,
+    /// 汉字 → 拼音 (反向映射, 用于构建 Concat 上下文)
+    pub char2pinyin: HashMap<String, String>,
     /// 特殊 token IDs
     pub cls_id: i64,  // [CLS] = 101
     pub sep_id: i64,  // [SEP] = 102
@@ -103,14 +105,22 @@ impl VocabIndex {
             }
         }
 
+        // 构建 char → pinyin 反向映射 (取第一个匹配的拼音)
+        let mut char2pinyin = HashMap::new();
+        for (py, chars) in &pinyin2char {
+            for ch in chars {
+                char2pinyin.entry(ch.clone()).or_insert_with(|| py.clone());
+            }
+        }
+
         let cls_id = *char2id.get("<sos>").unwrap_or(&101);
         let sep_id = *char2id.get("<eos>").unwrap_or(&102);
         let pad_id = *char2id.get("<pad>").unwrap_or(&0);
 
-        eprintln!("[AI] vocab: {} pinyin, {} chars, {} pinyin2char",
-            pinyin2id.len(), char2id.len(), pinyin2char_ids.len());
+        eprintln!("[AI] vocab: {} pinyin, {} chars, {} pinyin2char, {} char2pinyin",
+            pinyin2id.len(), char2id.len(), pinyin2char_ids.len(), char2pinyin.len());
         Some(VocabIndex {
-            pinyin2id, char2id, id2char, pinyin2char, pinyin2char_ids,
+            pinyin2id, char2id, id2char, pinyin2char, pinyin2char_ids, char2pinyin,
             cls_id, sep_id, pad_id, unk_id,
         })
     }
@@ -259,10 +269,34 @@ fn run_inference(
     Ok(logits.to_vec())
 }
 
+/// 构建 Concat 格式上下文: [CLS] [py1] char1 [py2] char2 ...
+/// 
+/// PinyinGPT 训练时见到的格式是拼音-汉字交替, 不是纯文字.
+/// 用 char2pinyin 反向映射把上下文汉字转为 Concat 格式.
+fn build_concat_context(vocab: &VocabIndex, context: &str) -> Vec<i64> {
+    let mut ids = vec![vocab.cls_id];
+    let ctx_chars: Vec<char> = context.chars().rev().take(30).collect::<Vec<_>>()
+        .into_iter().rev().collect();
+    
+    for ch in &ctx_chars {
+        let ch_str = ch.to_string();
+        // 查找该字的拼音
+        if let Some(py) = vocab.char2pinyin.get(&ch_str) {
+            if let Some(&py_id) = vocab.pinyin2id.get(py.as_str()) {
+                if let Some(&ch_id) = vocab.char2id.get(&ch_str) {
+                    ids.push(py_id);  // [py]
+                    ids.push(ch_id);  // char
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// 上下文感知 Concat 自回归预测
 ///
-/// 输入: [CLS] ctx_char1 ctx_char2 ... [py1] → 预测 char1
-///       [CLS] ctx_char1 ctx_char2 ... [py1] char1 [py2] → 预测 char2
+/// 输入: [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... [py1] → 预测 char1
+///       [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... [py1] char1 [py2] → 预测 char2
 fn run_predict(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
@@ -275,19 +309,12 @@ fn run_predict(
 
     let vocab_size = 21571usize;
 
-    // 构建上下文前缀: [CLS] ctx_chars...
-    let mut ctx_prefix = vec![vocab.cls_id];
-    let ctx_chars: Vec<char> = context.chars().rev().take(50).collect::<Vec<_>>()
-        .into_iter().rev().collect();
+    // 构建上下文前缀: [CLS] [py_ctx1]ctx1 [py_ctx2]ctx2 ... (Concat 训练格式)
+    let ctx_prefix = build_concat_context(vocab, context);
+    let ctx_len = (ctx_prefix.len() - 1) / 2;  // 每个字占 2 个 token
 
-    for ch in &ctx_chars {
-        if let Some(&cid) = vocab.char2id.get(&ch.to_string()) {
-            ctx_prefix.push(cid);
-        }
-    }
-
-    if !ctx_chars.is_empty() {
-        eprintln!("[AI] predict: ctx={}字, pinyin={}", ctx_chars.len(), pinyin);
+    if ctx_len > 0 {
+        eprintln!("[AI] predict: ctx={}字(Concat), pinyin={}", ctx_len, pinyin);
     }
 
     // 第一步: [...ctx] [py1] → top-K 首字
@@ -415,22 +442,10 @@ fn run_rerank(
     let vocab_size = 21571usize;
     let n = candidates.len();
 
-    // === 构建上下文 input_ids ===
-    // [CLS] ctx_char1 ctx_char2 ... [py1]
-    let mut input_ids = vec![vocab.cls_id];
-
-    // 添加上下文字符 (最近 N 个, 避免超出模型最大长度)
-    let ctx_chars: Vec<char> = context.chars().rev().take(50).collect::<Vec<_>>()
-        .into_iter().rev().collect();
-    let ctx_len = ctx_chars.len();
-
-    for ch in &ctx_chars {
-        let ch_str = ch.to_string();
-        if let Some(&cid) = vocab.char2id.get(&ch_str) {
-            input_ids.push(cid);
-        }
-        // 跳过不在词表里的字符
-    }
+    // === 构建 Concat 格式上下文 ===
+    // [CLS] [py_ctx1]ctx1 ... [py1]
+    let mut input_ids = build_concat_context(vocab, context);
+    let ctx_len = (input_ids.len() - 1) / 2;
 
     // 添加第一个拼音 token
     let py1_id = match vocab.pinyin2id.get(syllables[0].as_str()) {
