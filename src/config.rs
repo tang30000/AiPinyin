@@ -15,6 +15,8 @@ pub struct Config {
     pub ai: AiConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub dict: DictConfig,
 }
 
 /// 引擎模式
@@ -81,12 +83,27 @@ impl Default for UiConfig {
     }
 }
 
+/// 字典配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct DictConfig {
+    /// 额外加载的字典名 (从 dict/ 目录加载, 不含 .txt 后缀)
+    #[serde(default)]
+    pub extra: Vec<String>,
+}
+
+impl Default for DictConfig {
+    fn default() -> Self {
+        Self { extra: vec![] }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             engine: EngineConfig::default(),
             ai: AiConfig::default(),
             ui: UiConfig::default(),
+            dict: DictConfig::default(),
         }
     }
 }
@@ -102,6 +119,9 @@ impl Config {
                         eprintln!("[Config] ✅ 已加载 {:?}", config_path);
                         eprintln!("[Config]   mode={:?}, top_k={}, rerank={}, font={}",
                             cfg.engine.mode, cfg.ai.top_k, cfg.ai.rerank, cfg.ui.font_size);
+                        if !cfg.dict.extra.is_empty() {
+                            eprintln!("[Config]   extra dicts: {:?}", cfg.dict.extra);
+                        }
                         cfg
                     }
                     Err(e) => {

@@ -78,6 +78,9 @@ fn main() -> Result<()> {
     // 加载配置
     let cfg = config::Config::load();
 
+    // 初始化字典（基础 + 额外词库）
+    pinyin::init_global_dict(&cfg.dict.extra);
+
     // 初始化 AI 推理引擎
     let mut ai = ai_engine::AIPredictor::new();
     // 应用配置: 引擎模式

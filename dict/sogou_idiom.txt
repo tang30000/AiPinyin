@@ -1,0 +1,18 @@
+# sogou_idiom - 搜狗细胞词库
+# 共 16 条
+baozhuangposun,包装破损,50
+daohuaxiangsuanzaoyuguoqiaomixian,稻花香酸枣鱼过桥米线,50
+didian,地点,50
+dongxuechaoshi,东学超市,50
+huashengqiaokeliwei,花生巧克力味,50
+huangzishouganmian,皇子手擀面,50
+huodongshijian,活动时间,50
+jilihuangjiasubinghetaosu,吉利皇家素饼核桃酥,50
+jishigengzheng,及时更正,50
+kaikoupole,开口破了,50
+kangshifusongpaijiaxin,康师傅松派夹心,50
+nanxuechaoshi,南学超市,50
+shijian,时间,50
+tejiariqiyiguo,特价日期已过,50
+wuqianbufu,物签不符,50
+youqianwuhuo,有签无货,50

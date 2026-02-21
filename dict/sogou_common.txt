@@ -1,0 +1,32 @@
+# sogou_common - 搜狗细胞词库
+# 共 30 条
+chenyi,陈义,50
+dengxianhui,邓先辉,50
+fankaihua,范开华,50
+fengzhixiang,冯志祥,50
+hehuaixin,何怀新,50
+heji,合计,50
+huangdazhi,黄大志,50
+huangdazhong,黄大忠,50
+lijianchao,李建超,50
+liyan,李艳,50
+liuaidong,刘爱东,50
+liuhuili,刘惠丽,50
+liuzhongyu,刘忠宇,50
+luoqingyu,罗清玉,50
+luosuzhen,罗素珍,50
+panjing,潘静,50
+qiuzicheng,邱自成,50
+tuweiyinyong,涂伟殷勇,50
+wangchanggui,王长贵,50
+wangshiqiu,王世秋,50
+wangyanwen,王艳文,50
+wuxiangze,吴相泽,50
+yinliqin,银丽琴,50
+yubihui,余碧辉,50
+zhangqian,张黔,50
+zhangshurong,张淑容,50
+zhaolanying,赵兰英,50
+zhaoqiongfang,赵琼芳,50
+zhengqingxia,郑晴霞,50
+zoushiping,邹仕平,50

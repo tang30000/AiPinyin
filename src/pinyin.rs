@@ -274,31 +274,101 @@ impl Dictionary {
             cands.sort_by(|a, b| b.weight.cmp(&a.weight));
         }
     }
+
+    /// 合并额外词典文本到当前字典, 返回新增条目数
+    pub fn merge_text(&mut self, text: &str) -> usize {
+        let mut added = 0;
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+
+            let parts: Vec<&str> = line.splitn(3, ',').collect();
+            if parts.len() < 2 { continue; }
+
+            let raw_py = parts[0].trim().to_lowercase();
+            let word = parts[1].trim();
+            let weight: u32 = parts.get(2)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(50);
+
+            if raw_py.is_empty() || word.is_empty() { continue; }
+
+            // 检查是否已存在 (避免重复)
+            let exists = self.exact.get(&raw_py)
+                .map(|v| v.iter().any(|c| c.word == word))
+                .unwrap_or(false);
+            if exists { continue; }
+
+            let cand = Candidate {
+                word: word.to_string(),
+                weight,
+                pinyin: raw_py.clone(),
+            };
+
+            let idx = self.all.len();
+            self.all.push(cand.clone());
+
+            // 精确索引
+            self.exact.entry(raw_py.clone()).or_default().push(cand);
+
+            // 前缀索引
+            let max_prefix = raw_py.len().min(6);
+            for plen in 1..=max_prefix {
+                let pre = &raw_py[..plen];
+                self.prefix.entry(pre.to_string()).or_default().push(idx);
+            }
+
+            // 缩写索引
+            let ab = make_abbreviation(&raw_py);
+            if ab.len() >= 2 && ab != raw_py {
+                self.abbrev.entry(ab).or_default().push(idx);
+            }
+
+            added += 1;
+        }
+
+        // 重排精确组
+        for v in self.exact.values_mut() {
+            v.sort_by(|a, b| b.weight.cmp(&a.weight));
+        }
+
+        added
+    }
 }
 
 pub fn global_dict() -> &'static Dictionary {
-    DICT.get_or_init(|| load_dictionary())
+    DICT.get_or_init(|| load_dictionary(&[]))
 }
 
-fn load_dictionary() -> Dictionary {
-    let dict_path = std::env::current_exe()
+/// 初始化全局字典（带额外词库），由 main 调用
+pub fn init_global_dict(extra_names: &[String]) {
+    DICT.get_or_init(|| load_dictionary(extra_names));
+}
+
+fn load_dictionary(extra_names: &[String]) -> Dictionary {
+    let exe_dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("dict.txt")))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    // 1. 加载基础词典 (dict.txt)
+    let dict_path = exe_dir.as_ref()
+        .map(|d| d.join("dict.txt"))
         .filter(|p| p.exists())
         .or_else(|| {
             let p = std::path::Path::new("dict.txt");
             if p.exists() { Some(p.to_path_buf()) } else { None }
         });
 
-    match dict_path {
+    let mut dict = match dict_path {
         Some(path) => {
-            eprintln!("[Dict] {:?}", path);
+            eprintln!("[Dict] 基础词典: {:?}", path);
             let start = std::time::Instant::now();
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    let dict = Dictionary::from_text(&text);
-                    eprintln!("[Dict] {:?}", start.elapsed());
-                    dict
+                    let d = Dictionary::from_text(&text);
+                    eprintln!("[Dict] 基础词典加载: {:?}", start.elapsed());
+                    d
                 }
                 Err(e) => {
                     eprintln!("[Dict] error: {}", e);
@@ -310,7 +380,35 @@ fn load_dictionary() -> Dictionary {
             eprintln!("[Dict] no dict.txt, builtin fallback");
             Dictionary::from_text(BUILTIN_DICT)
         }
+    };
+
+    // 2. 加载额外词库 (dict/*.txt)
+    if !extra_names.is_empty() {
+        let dict_dir = exe_dir.as_ref()
+            .map(|d| d.join("dict"))
+            .or_else(|| Some(std::path::PathBuf::from("dict")));
+
+        for name in extra_names {
+            let ext_path = dict_dir.as_ref()
+                .map(|d| d.join(format!("{}.txt", name)));
+
+            if let Some(path) = ext_path.filter(|p| p.exists()) {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let count = dict.merge_text(&text);
+                        eprintln!("[Dict] +{}: {} 条", name, count);
+                    }
+                    Err(e) => {
+                        eprintln!("[Dict] ⚠ {}: {}", name, e);
+                    }
+                }
+            } else {
+                eprintln!("[Dict] ⚠ 未找到词库: {}", name);
+            }
+        }
     }
+
+    dict
 }
 
 const BUILTIN_DICT: &str = "\

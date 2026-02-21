@@ -16,3 +16,17 @@ rerank = false
 font_size = 16
 # 候选窗口透明度 (0-255, 255=不透明)
 opacity = 240
+
+[dict]
+# 额外词库 (从 dict/ 目录加载, 不含 .txt 后缀)
+# 可选词库:
+#   sogou_it        - IT计算机 (3151条)
+#   sogou_city      - 城市信息 (10万条)
+#   sogou_daily     - 日常用语 (4560条)
+#   sogou_poem      - 古诗词 (39万条)
+#   sogou_neologism - 网络流行新词 (1万条)
+#   sogou_region    - 城市地名 (3563条)
+#   sogou_medical   - 医学词汇 (145条)
+#   sogou_food      - 食物 (249条)
+#   sogou_idiom     - 成语 (16条)
+extra = []
