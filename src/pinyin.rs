@@ -96,6 +96,12 @@ fn split_pinyin(input: &str) -> Vec<String> {
     result
 }
 
+/// 公开的拼音切分接口（供 ai_engine 使用）
+pub fn split_pinyin_pub(input: &str) -> Vec<String> {
+    if !input.is_ascii() { return vec![input.to_string()]; }
+    split_pinyin(input)
+}
+
 fn is_valid_syllable(s: &str) -> bool {
     VALID_SYLLABLES.contains(&s)
 }

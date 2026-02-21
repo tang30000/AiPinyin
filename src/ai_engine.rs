@@ -74,21 +74,76 @@ pub enum AIState {
     Unavailable(String),
 }
 
+/// 拼音/汉字词表索引（从 JSON 加载）
+pub struct VocabIndex {
+    pub pinyin2id: std::collections::HashMap<String, i64>,
+    pub char2id: std::collections::HashMap<String, i64>,
+    pub id2char: std::collections::HashMap<i64, String>,
+    pub max_pinyin_len: usize,
+    pub max_context_len: usize,
+}
+
+impl VocabIndex {
+    fn load_from_dir(dir: &std::path::Path) -> Option<Self> {
+        let py_path = dir.join("pinyin2id.json");
+        let ch_path = dir.join("char2id.json");
+        let meta_path = dir.join("vocab_meta.json");
+
+        if !py_path.exists() || !ch_path.exists() {
+            eprintln!("[AI] vocab files not found in {:?}", dir);
+            return None;
+        }
+
+        let py_text = std::fs::read_to_string(&py_path).ok()?;
+        let ch_text = std::fs::read_to_string(&ch_path).ok()?;
+
+        let pinyin2id: std::collections::HashMap<String, i64> =
+            serde_json::from_str(&py_text).ok()?;
+        let char2id: std::collections::HashMap<String, i64> =
+            serde_json::from_str(&ch_text).ok()?;
+
+        let id2char: std::collections::HashMap<i64, String> =
+            char2id.iter().map(|(k, v)| (*v, k.clone())).collect();
+
+        let (max_pinyin_len, max_context_len) = if meta_path.exists() {
+            let meta_text = std::fs::read_to_string(&meta_path).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&meta_text).ok()?;
+            (
+                meta.get("max_pinyin_len").and_then(|v| v.as_u64()).unwrap_or(32) as usize,
+                meta.get("max_context_len").and_then(|v| v.as_u64()).unwrap_or(64) as usize,
+            )
+        } else {
+            (32, 64)
+        };
+
+        eprintln!("[AI] vocab: {} pinyin, {} chars, py_max={}, ctx_max={}",
+            pinyin2id.len(), char2id.len(), max_pinyin_len, max_context_len);
+        Some(VocabIndex { pinyin2id, char2id, id2char, max_pinyin_len, max_context_len })
+    }
+}
+
 /// AI 候选词重排器
 pub struct AIPredictor {
     state: AIState,
+    vocab: Option<VocabIndex>,
     model_path: PathBuf,
 }
 
 impl AIPredictor {
-    /// 尝试加载模型，失败时静默回退
+    /// 尝试加载模型 + 词表，失败时静默回退
     pub fn new() -> Self {
         let model_path = find_model_path();
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+        // 加载词表
+        let vocab = exe_dir.as_ref().and_then(|d| VocabIndex::load_from_dir(d));
 
         let state = match &model_path {
             Some(path) => match load_model(path) {
                 Ok(session) => {
-                    eprintln!("[AI] \u{2705} \u{6a21}\u{578b}\u{5df2}\u{52a0}\u{8f7d}: {:?}", path);
+                    eprintln!("[AI] \u{2705} model loaded: {:?}", path);
                     log_model_info(&session);
                     AIState::Ready(session)
                 }
@@ -105,34 +160,35 @@ impl AIPredictor {
 
         Self {
             state,
+            vocab,
             model_path: model_path.unwrap_or_default(),
         }
     }
 
     pub fn is_available(&self) -> bool {
-        matches!(self.state, AIState::Ready(_))
+        matches!(self.state, AIState::Ready(_)) && self.vocab.is_some()
     }
 
     pub fn model_path(&self) -> &Path {
         &self.model_path
     }
-
-    /// 重排候选词
-    ///
-    /// 管线: 字典候选 → AI 语义重排
-    /// 失败时原样返回（零干扰回退）
+    /// 重排候选词: 字典候选 → AI 语义重排
     pub fn rerank(
-        &self,
+        &mut self,
         pinyin: &str,
         candidates: Vec<String>,
         context: &HistoryBuffer,
     ) -> Vec<String> {
-        let session = match &self.state {
+        let session = match &mut self.state {
             AIState::Ready(s) => s,
             AIState::Unavailable(_) => return candidates,
         };
+        let vocab = match &self.vocab {
+            Some(v) => v,
+            None => return candidates,
+        };
 
-        match self.run_inference(session, pinyin, &candidates, context) {
+        match run_inference(session, vocab, pinyin, &candidates, context) {
             Ok(scores) => {
                 let mut indexed: Vec<(usize, f32)> =
                     scores.into_iter().enumerate().collect();
@@ -148,48 +204,64 @@ impl AIPredictor {
             }
         }
     }
-
-    /// ONNX 推理（预留接口）
-    ///
-    /// 当前返回占位评分（保持原序），
-    /// 等自训练模型完成后替换。
-    fn run_inference(
-        &self,
-        _session: &ort::session::Session,
-        _pinyin: &str,
-        candidates: &[String],
-        _context: &HistoryBuffer,
-    ) -> Result<Vec<f32>, String> {
-        // ══════════════════════════════════════════════════
-        // TODO: 替换为真正的 ONNX 推理
-        //
-        // 自训练模型规范:
-        //   Architecture: Transformer-Encoder (6 layers, d=256, 4 heads)
-        //   Input:  pinyin token ids  [1, seq_len] i64
-        //   Input:  context char ids  [1, ctx_len] i64
-        //   Output: char logits       [1, vocab]   f32
-        //
-        // 推理流程:
-        //   1. tokenize(pinyin) → input_ids
-        //   2. encode(context)  → context_ids
-        //   3. session.run(inputs![input_ids, context_ids]?)
-        //   4. 从 logits 中提取 candidates 对应字的分数
-        //   5. 按分数排序
-        //
-        // 示例代码 (ort v2):
-        //
-        // use ndarray::Array2;
-        // let input = Array2::<i64>::zeros((1, pinyin_len));
-        // let ctx   = Array2::<i64>::zeros((1, ctx_len));
-        // let outputs = session.run(ort::inputs![input, ctx]?)?;
-        // let logits = outputs[0].try_extract_tensor::<f32>()?;
-        // ══════════════════════════════════════════════════
-
-        // 占位分数：保持字典原始排序
-        let n = candidates.len();
-        Ok((0..n).map(|i| 1.0 - (i as f32 / n.max(1) as f32)).collect())
-    }
 }
+
+/// ONNX 推理 (free function to avoid borrow conflicts)
+fn run_inference(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    pinyin: &str,
+    candidates: &[String],
+    context: &HistoryBuffer,
+) -> Result<Vec<f32>, String> {
+    // 1. 编码拼音
+    let syllables = crate::pinyin::split_pinyin_pub(pinyin);
+    let mut py_ids = vec![0i64; vocab.max_pinyin_len];
+    for (i, syl) in syllables.iter().enumerate().take(vocab.max_pinyin_len) {
+        py_ids[i] = *vocab.pinyin2id.get(syl.as_str()).unwrap_or(&1);
+    }
+
+    // 2. 编码上下文
+    let ctx_str = context.context_string();
+    let mut ctx_ids = vec![0i64; vocab.max_context_len];
+    for (i, ch) in ctx_str.chars().rev().enumerate().take(vocab.max_context_len) {
+        let idx = vocab.max_context_len - 1 - i;
+        ctx_ids[idx] = *vocab.char2id.get(&ch.to_string()).unwrap_or(&1);
+    }
+
+    // 3. 创建 ort Tensor
+    let py_value = ort::value::Tensor::from_array(
+        ([1usize, vocab.max_pinyin_len], py_ids)
+    ).map_err(|e| format!("py tensor: {}", e))?;
+    let ctx_value = ort::value::Tensor::from_array(
+        ([1usize, vocab.max_context_len], ctx_ids)
+    ).map_err(|e| format!("ctx tensor: {}", e))?;
+
+    // 4. 运行推理
+    let outputs = session.run(ort::inputs![py_value, ctx_value])
+        .map_err(|e| format!("session.run: {}", e))?;
+
+    // 5. 提取 logits [1, vocab_size]
+    let (_shape, logits_data) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("extract logits: {}", e))?;
+
+    // 6. 为每个候选词提取分数
+    let scores: Vec<f32> = candidates.iter().map(|cand| {
+        if let Some(first_char) = cand.chars().next() {
+            if let Some(&char_id) = vocab.char2id.get(&first_char.to_string()) {
+                let idx = char_id as usize;
+                if idx < logits_data.len() {
+                    return logits_data[idx];
+                }
+            }
+        }
+        f32::NEG_INFINITY
+    }).collect();
+
+    Ok(scores)
+}
+
 
 // ============================================================
 // 辅助函数
@@ -263,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_ai_fallback() {
-        let ai = AIPredictor::new();
+        let mut ai = AIPredictor::new();
         // CI 环境下无 onnxruntime DLL 且无模型文件
         assert!(!ai.is_available());
 

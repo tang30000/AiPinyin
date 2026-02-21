@@ -1,0 +1,12 @@
+{
+  "pinyin_vocab_size": 409,
+  "char_vocab_size": 7020,
+  "special_tokens": {
+    "<PAD>": 0,
+    "<UNK>": 1,
+    "<BOS>": 2,
+    "<EOS>": 3
+  },
+  "max_pinyin_len": 32,
+  "max_context_len": 64
+}
