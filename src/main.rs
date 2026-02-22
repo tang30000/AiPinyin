@@ -591,12 +591,9 @@ unsafe fn trigger_next_prediction(state: &mut ImeState) {
     let hwnd_raw = state.cand_win.hwnd().0 as isize;
     state.ai_generation += 1;
     let gen = state.ai_generation;
-    // 记下刚上屏的词，用于去重（防止"为了"一直循环推荐"为了"）
     let last_word = state.history.recent(1).first().map(|s| s.to_string()).unwrap_or_default();
-    state.all_candidates.clear();
-    state.current_candidates.clear();
+    // 不清空、不 hide：让旧候选保持可见直到 AI 结果到来
     state.page_offset = 0;
-    state.cand_win.hide();
 
     std::thread::spawn(move || {
         let state_ptr = GLOBAL_STATE;
