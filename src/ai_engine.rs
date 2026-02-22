@@ -317,7 +317,7 @@ fn run_predict(
         let graph_cands = word_graph_segment(&syllables, 8);
         
         // AI 贪心生成 (不依赖字典, 纯 AI 逐字预测)
-        let greedy = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, 2)
+        let greedy = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, 5)
             .unwrap_or_default();
 
         // 合并候选: 词图 + 字典 + AI贪心
@@ -616,7 +616,7 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
             // 按权重排序, 取 top-3
             let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
             sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
-            for entry in sorted.iter().take(3) {
+            for entry in sorted.iter().take(5) {
                 word_at[i].push((j, entry.word.clone(), entry.weight, length));
             }
         }
@@ -628,7 +628,7 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
             if !entries.is_empty() {
                 let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
                 sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
-                for entry in sorted.iter().take(3) {
+                for entry in sorted.iter().take(5) {
                     word_at[i].push((i + 1, entry.word.clone(), entry.weight, 1));
                 }
             }
