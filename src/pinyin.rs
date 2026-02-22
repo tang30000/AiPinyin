@@ -198,8 +198,9 @@ fn sanitize_pinyin(raw: &str) -> Option<String> {
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Candidate {
     pub word: String,
     pub weight: u32,
@@ -282,6 +283,7 @@ pub fn lookup_with_cache(pinyin: &str) -> Vec<Candidate> {
     result
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Dictionary {
     /// 精确匹配: "shi" -> [是, 时, ...]
     exact: HashMap<String, Vec<Candidate>>,
@@ -480,7 +482,28 @@ fn load_dictionary(extra_names: &[String]) -> Dictionary {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-    // 1. 加载基础词典 (dict.txt)
+    // 优先加载二进制缓存 (dict.bin)
+    let bin_path = exe_dir.as_ref().map(|d| d.join("dict.bin"));
+    if extra_names.is_empty() {
+        if let Some(ref bp) = bin_path {
+            if bp.exists() {
+                let start = std::time::Instant::now();
+                match std::fs::read(bp) {
+                    Ok(bytes) => match bincode::deserialize::<Dictionary>(&bytes) {
+                        Ok(d) => {
+                            eprintln!("[Dict] 二进制缓存加载: {:?} ({} 条)",
+                                start.elapsed(), d.all.len());
+                            return d;
+                        }
+                        Err(e) => eprintln!("[Dict] bin 反序列化失败: {}, 回退文本", e),
+                    }
+                    Err(e) => eprintln!("[Dict] bin 读取失败: {}, 回退文本", e),
+                }
+            }
+        }
+    }
+
+    // 回退: 加载文本词典 (dict.txt)
     let dict_path = exe_dir.as_ref()
         .map(|d| d.join("dict.txt"))
         .filter(|p| p.exists())
@@ -533,6 +556,23 @@ fn load_dictionary(extra_names: &[String]) -> Dictionary {
                 }
             } else {
                 eprintln!("[Dict] ⚠ 未找到词库: {}", name);
+            }
+        }
+    }
+
+    // 自动生成二进制缓存 (仅基础词典, 无额外词库时)
+    if extra_names.is_empty() {
+        if let Some(ref bp) = bin_path {
+            let start = std::time::Instant::now();
+            match bincode::serialize(&dict) {
+                Ok(bytes) => {
+                    match std::fs::write(bp, &bytes) {
+                        Ok(_) => eprintln!("[Dict] 已生成二进制缓存: {:?} ({:.1} MB, {:?})",
+                            bp, bytes.len() as f64 / 1_048_576.0, start.elapsed()),
+                        Err(e) => eprintln!("[Dict] 写入 bin 失败: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("[Dict] 序列化失败: {}", e),
             }
         }
     }
