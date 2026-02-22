@@ -187,19 +187,44 @@ unsafe fn cb_process_key(vkey: u32) {
     if GLOBAL_STATE.is_null() { return; }
     let state = &mut *GLOBAL_STATE;
 
-    // 联想模式特殊处理：ESC/退格 → 退出联想; 字母键 → 退出联想转正常输入
+    // 联想模式特殊处理
     if state.prediction_mode {
         match vkey {
-            0x1B | 0x08 => { // ESC 或 退格 → 退出联想
+            0x1B | 0x08 => { // ESC/退格 → 退出联想
                 state.prediction_mode = false;
                 state.cand_win.hide();
                 return;
             }
-            0x41..=0x5A => { // A-Z → 退出联想，让正常流程处理
-                state.prediction_mode = false;
-                // 继续往下走，正常处理字母键
+            0x31..=0x39 => { // 数字键 → 选第N个联想词
+                let idx = (vkey - 0x31) as usize; // 0-based
+                if let Some(text) = state.current_candidates.get(idx).cloned() {
+                    state.history.push(&text);
+                    eprintln!("[联想] ↑ 上屏 {:?}", text);
+                    send_unicode_text(&text);
+                    // 继续联想下一词
+                    refresh_predictions(state);
+                }
+                return;
             }
-            _ => {} // 数字键选词，正常流程处理
+            0x20 => { // 空格 → 选第一个联想词
+                if let Some(text) = state.current_candidates.first().cloned() {
+                    if text != "…" { // 还在加载中时忽略
+                        state.history.push(&text);
+                        eprintln!("[联想] ↑ 空格选 {:?}", text);
+                        send_unicode_text(&text);
+                        refresh_predictions(state);
+                    }
+                }
+                return;
+            }
+            0x41..=0x5A => { // A-Z → 退出联想，正常处理
+                state.prediction_mode = false;
+            }
+            _ => { // 其他键 → 退出联想
+                state.prediction_mode = false;
+                state.cand_win.hide();
+                return;
+            }
         }
     }
 
