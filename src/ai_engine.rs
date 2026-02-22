@@ -250,81 +250,51 @@ impl AIPredictor {
         }
     }
 
-    /// 无拼音约束的「下一词联想」
+    /// 联想续写：把上下文喂给模型，AI 自回归生成接下来的字序列
     ///
-    /// 上屏后调用，根据历史上下文预测下一个最可能的字/词。
-    /// 返回 top_k 个候选（先 AI 高频字，再展开为 2 字词）。
-    pub fn predict_next_words(
+    /// 两轮推理（纯 AI，不使用拼音字典）:
+    ///   第1轮: 从历史上下文预测第1个字，取 top-beam 个
+    ///   第2轮: 各延伸1个字，得到 top_k 个2字组合
+    pub fn generate_continuations(
         &mut self, context: &HistoryBuffer, top_k: usize,
     ) -> Vec<String> {
-        let session = match &mut self.state {
-            AIState::Ready(s) => s, _ => return vec![],
+        // 手动拆开 self 以满足借用检查器（session 可变，vocab 不变）
+        let (session, vocab) = match (&mut self.state, &self.vocab) {
+            (AIState::Ready(s), Some(v)) => (s, v),
+            _ => return vec![],
         };
-        let vocab = match &self.vocab {
-            Some(v) => v, None => return vec![],
-        };
+
         let ctx_str = context.context_string();
-        // 构建上下文 ids
-        let ctx_ids: Vec<i64> = ctx_str.chars()
-            .filter_map(|c| vocab.char2id.get(&c.to_string()).copied())
-            .collect();
-        // 至少给一个 CLS token
-        let mut ids = if ctx_ids.is_empty() {
-            vec![vocab.cls_id]
-        } else {
-            let mut v = vec![vocab.cls_id];
-            v.extend_from_slice(&ctx_ids);
-            v
+        let base_ids: Vec<i64> = {
+            let mut ids = vec![vocab.cls_id];
+            ids.extend(ctx_str.chars()
+                .filter_map(|c| vocab.char2id.get(&c.to_string()).copied()));
+            ids.push(vocab.sep_id);
+            ids
         };
-        // 加 SEP 标记结束上文
-        ids.push(vocab.sep_id);
 
-        let logits = match run_inference(session, &ids) {
-            Ok(l) => l, Err(_) => return vec![],
-        };
-        // vocab_size = logits总长 / seq_len（每个token位置输出一组logits）
-        let seq_len = ids.len();
-        if logits.is_empty() || logits.len() % seq_len != 0 { return vec![]; }
-        let vocab_size = logits.len() / seq_len;
-        let offset = (seq_len - 1) * vocab_size;
-        if offset + vocab_size > logits.len() { return vec![]; }
+        // 第1轮：预测第1个字
+        let beam = (top_k + 2).min(12);
+        let first_chars = top_chars(session, vocab, &base_ids, beam);
+        if first_chars.is_empty() { return vec![]; }
 
-        // 无约束 top-k：直接取概率最高的字
-        let mut scored: Vec<(i64, f32)> = logits[offset..offset + vocab_size]
-            .iter().enumerate()
-            .filter(|(i, _)| *i >= 4) // 跳过特殊 token
-            .map(|(i, &s)| (i as i64, s))
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // 收集候选：对每个顶级字，先尝试 dict 中以该字起始的常用词
-        let dict = crate::pinyin::get_dict();
+        // 第2轮：各字延伸1字，得到2字组合
         let mut result: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        for (ch1, _) in &first_chars {
+            let ch1_id = match vocab.char2id.get(ch1) {
+                Some(&id) => id, None => continue,
+            };
+            let mut ext_ids = base_ids.clone();
+            ext_ids.push(ch1_id);
 
-        for (id, _) in scored.iter().take(top_k * 3) {
-            let ch = match vocab.id2char.get(id) { Some(c) => c.clone(), None => continue };
-            // 过滤特殊 token（<eos>, [UNK], ##词缀等）
-            if ch.contains('<') || ch.contains('>') || ch.contains('[') || ch.starts_with("##") {
-                continue;
+            for (ch2, _) in top_chars(session, vocab, &ext_ids, 3) {
+                let word = format!("{}{}", ch1, ch2);
+                if seen.insert(word.clone()) { result.push(word); }
+                if result.len() >= top_k { return result; }
             }
-            // 只保留单个中文字符
-            let chars: Vec<char> = ch.chars().collect();
-            if chars.len() != 1 || !('\u{4E00}'..='\u{9FFF}').contains(&chars[0]) {
-                continue;
-            }
-            // 先尝试 dict 里以该字开头的词（如「时」→「时间」「时候」「时代」）
-            if let Some(dict_ref) = dict.as_ref() {
-                let prefix_cands = dict_ref.lookup_prefix_char(&ch);
-                for w in prefix_cands.into_iter().take(2) {
-                    if w.chars().count() == 2 && seen.insert(w.clone()) {
-                        result.push(w);
-                    }
-                }
-            }
-            // 单字作为保底
-            if seen.insert(ch.clone()) { result.push(ch); }
-            if result.len() >= top_k { break; }
+            if seen.insert(ch1.clone()) { result.push(ch1.clone()); }
+            if result.len() >= top_k { return result; }
         }
         result
     }
@@ -351,7 +321,45 @@ impl AIPredictor {
 // ONNX 推理
 // ============================================================
 
-/// 运行推理: input_ids → logits (GPT2-Chinese 只需要 input_ids)
+/// 从 token 序列推理，返回最高概率的 top_n 个中文单字（含得分）
+fn top_chars(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    ids: &[i64],
+    top_n: usize,
+) -> Vec<(String, f32)> {
+    let logits = match run_inference(session, ids) {
+        Ok(l) => l, Err(_) => return vec![],
+    };
+    let seq_len = ids.len();
+    if logits.is_empty() || logits.len() % seq_len != 0 { return vec![]; }
+    let vocab_size = logits.len() / seq_len;
+    let offset = (seq_len - 1) * vocab_size;
+
+    let mut scored: Vec<(i64, f32)> = logits[offset..offset + vocab_size]
+        .iter().enumerate()
+        .filter(|(i, _)| *i >= 4)
+        .map(|(i, &s)| (i as i64, s))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut result = Vec::new();
+    for (id, score) in &scored {
+        if result.len() >= top_n { break; }
+        let ch = match vocab.id2char.get(id) { Some(c) => c, None => continue };
+        if ch.contains('<') || ch.contains('>') || ch.contains('[') || ch.starts_with("##") {
+            continue;
+        }
+        let chars: Vec<char> = ch.chars().collect();
+        if chars.len() != 1 || !('\u{4E00}'..='\u{9FFF}').contains(&chars[0]) {
+            continue;
+        }
+        result.push((ch.clone(), *score));
+    }
+    result
+}
+
+/// 运行推理: input_ids → logits
 fn run_inference(
     session: &mut ort::session::Session,
     input_ids: &[i64],

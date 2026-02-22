@@ -10,6 +10,9 @@ mode = "ai"
 top_k = 5
 # AI 是否参与字典候选排序 (true/false)
 rerank = true
+# 上屏后自动联想下一词 (true=开启, false=关闭, 默认关闭)
+# 注意: 当前模型（拼音Concat模型）不擅长这一任务, 预测质量较差, 建议关闭
+predict_next = false
 
 [ui]
 # 候选窗口字体大小
@@ -29,4 +32,14 @@ opacity = 240
 #   sogou_medical   - 医学词汇 (145条)
 #   sogou_food      - 食物 (249条)
 #   sogou_idiom     - 成语 (16条)
-extra = []
+extra = [
+    "sogou_common",    # 通用词汇 (基础)
+    "sogou_daily",     # 日常用语 (4560条)
+    "sogou_it",        # IT计算机 (3151条)
+    "sogou_city",      # 城市信息 (10万条)
+    "sogou_region",    # 城市地名 (3563条)
+    "sogou_neologism", # 网络新词 (1万条)
+    "sogou_food",      # 食物 (249条)
+    "sogou_idiom",     # 成语 (16条)
+    "sogou_medical",   # 医学词汇 (145条)
+]

@@ -52,13 +52,16 @@ pub struct AiConfig {
     /// AI 是否参与字典候选排序
     #[serde(default)]
     pub rerank: bool,
+    /// 上屏后自动联想下一词（需AI可用）
+    #[serde(default)]
+    pub predict_next: bool,
 }
 
 fn default_top_k() -> usize { 9 }
 
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { top_k: default_top_k(), rerank: false }
+        Self { top_k: default_top_k(), rerank: false, predict_next: false }
     }
 }
 
