@@ -302,8 +302,17 @@ impl AIPredictor {
         let mut result: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        for (id, _) in scored.iter().take(top_k * 2) {
+        for (id, _) in scored.iter().take(top_k * 3) {
             let ch = match vocab.id2char.get(id) { Some(c) => c.clone(), None => continue };
+            // 过滤特殊 token（<eos>, [UNK], ##词缀等）
+            if ch.contains('<') || ch.contains('>') || ch.contains('[') || ch.starts_with("##") {
+                continue;
+            }
+            // 只保留单个中文字符
+            let chars: Vec<char> = ch.chars().collect();
+            if chars.len() != 1 || !('\u{4E00}'..='\u{9FFF}').contains(&chars[0]) {
+                continue;
+            }
             // 先尝试 dict 里以该字开头的词（如「时」→「时间」「时候」「时代」）
             if let Some(dict_ref) = dict.as_ref() {
                 let prefix_cands = dict_ref.lookup_prefix_char(&ch);

@@ -319,17 +319,18 @@ unsafe extern "system" fn low_level_keyboard_hook(
             }
 
             // 中文模式：先判断是否要拦截，立即返回，再异步处理
+            let has_input = !state.input.engine.is_empty() || state.prediction_mode;
             let should_eat = match vkey {
-                0x41..=0x5A => true,  // A-Z
-                0x08 => !state.input.engine.is_empty(), // Backspace
-                0x20 => !state.input.engine.is_empty(), // Space
-                0x31..=0x39 => !state.input.engine.is_empty(), // 1-9
-                0x1B => !state.input.engine.is_empty(), // Escape
+                0x41..=0x5A => true,  // A-Z 永远拦截（中文模式）
+                0x08 => !state.input.engine.is_empty() || state.prediction_mode, // Backspace
+                0x20 => !state.input.engine.is_empty(), // Space（联想模式不拦截空格）
+                0x31..=0x39 => has_input, // 1-9：有候选或联想时拦截
+                0x1B => has_input, // Escape
                 0x0D => !state.input.engine.is_empty(), // Enter
-                0xBB => !state.input.engine.is_empty(), // = (下一页)
-                0xBD => !state.input.engine.is_empty(), // - (上一页)
-                0x21 => !state.input.engine.is_empty(), // PgUp
-                0x22 => !state.input.engine.is_empty(), // PgDn
+                0xBB => has_input, // = (下一页)
+                0xBD => has_input, // - (上一页)
+                0x21 => has_input, // PgUp
+                0x22 => has_input, // PgDn
                 _ => false,
             };
 
@@ -638,18 +639,23 @@ unsafe fn get_caret_screen_pos() -> POINT {
             ..Default::default()
         };
         if GetGUIThreadInfo(thread_id, &mut gi).is_ok() && !gi.hwndCaret.is_invalid() {
-            // 光标矩形必须有实际尺寸（防止一些应用返回 0 尺寸的假坐标）
             let caret_h = gi.rcCaret.bottom - gi.rcCaret.top;
             let caret_w = gi.rcCaret.right - gi.rcCaret.left;
             if caret_h > 0 || caret_w > 0 {
                 let mut pt = POINT {
                     x: gi.rcCaret.left,
-                    y: gi.rcCaret.bottom,  // 光标下沿，候选窗显示在正下方
+                    y: gi.rcCaret.bottom,
                 };
                 let _ = ClientToScreen(gi.hwndCaret, &mut pt);
-                // 坐标合理性：必须在屏幕正范围内
                 if pt.x >= 0 && pt.y >= 0 {
-                    return pt;
+                    // 合理性检验：对比鼠标位置。若偏差 > 500px 则很可能是虚假坐标
+                    let mut mouse = POINT::default();
+                    let _ = GetCursorPos(&mut mouse);
+                    let dy = (pt.y - mouse.y).abs();
+                    if dy < 500 {
+                        return pt;
+                    }
+                    // dy >= 500：caret 坐标可疑，回落到鼠标策略
                 }
             }
         }
@@ -664,7 +670,7 @@ unsafe fn get_caret_screen_pos() -> POINT {
         }
     }
 
-    // ── 策略3: 鼠标光标位置（偏移下方）──
+    // ── 策略3: 鼠标光标位置（最可靠的回退）──
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
     POINT { x: pt.x, y: pt.y + 20 }
