@@ -103,7 +103,7 @@ fn main() -> Result<()> {
     let mut ai = ai_engine::AIPredictor::new();
     // 应用配置: 引擎模式
     ai.ai_first = cfg.engine.mode == config::EngineMode::Ai;
-    let history = ai_engine::HistoryBuffer::new(50);
+    let history = ai_engine::HistoryBuffer::new(100);
 
     let cand_win = ui::CandidateWindow::new()?;
     let user_dict = user_dict::UserDict::load();
