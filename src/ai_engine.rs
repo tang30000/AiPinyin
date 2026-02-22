@@ -312,17 +312,38 @@ fn run_predict(
         return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
-    // === 3+音节: 词图分词 → AI 评分 ===
-    if syllables.len() >= 3 {
-        let graph_cands = word_graph_segment(&syllables, 5);
-        if !graph_cands.is_empty() {
-            eprintln!("[AI] 词图分词: {} 条", graph_cands.len());
-            for (i, c) in graph_cands.iter().enumerate().take(3) {
+    // === 2+音节: 词图分词 → AI 评分 + AI贪心兜底 ===
+    if syllables.len() >= 2 {
+        let graph_cands = word_graph_segment(&syllables, 8);
+        
+        // AI 贪心生成 (不依赖字典, 纯 AI 逐字预测)
+        let greedy = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, 2)
+            .unwrap_or_default();
+
+        // 合并候选: 词图 + 字典 + AI贪心
+        let mut all_cands: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for c in &graph_cands {
+            if seen.insert(c.clone()) { all_cands.push(c.clone()); }
+        }
+        // 字典候选也加入
+        let target_len = syllables.len();
+        for w in dict_words.iter().filter(|w| w.chars().count() == target_len).take(5) {
+            if seen.insert(w.clone()) { all_cands.push(w.clone()); }
+        }
+        for g in &greedy {
+            if seen.insert(g.clone()) { all_cands.push(g.clone()); }
+        }
+
+        if !all_cands.is_empty() {
+            eprintln!("[AI] 词图+贪心: {} 条 (词图{}, 贪心{})",
+                all_cands.len(), graph_cands.len(), greedy.len());
+            for (i, c) in all_cands.iter().enumerate().take(3) {
                 eprintln!("[AI]   #{}: {}", i+1, c);
             }
-            // 用 AI 对词图候选评分 (前4字累计概率, 够区分)
+            // 用 AI 对所有候选评分
             let mut scored: Vec<(String, f32)> = Vec::new();
-            for sentence in &graph_cands {
+            for sentence in &all_cands {
                 let chars: Vec<char> = sentence.chars().collect();
                 let score_len = std::cmp::min(4, chars.len());
                 let mut ids = ctx_prefix.clone();
@@ -352,92 +373,8 @@ fn run_predict(
         }
     }
 
-    // === 2音节: 字典引导评分 ===
-    let target_len = syllables.len();
-    let candidates: Vec<&String> = dict_words.iter()
-        .filter(|w| w.chars().count() == target_len)
-        .take(9)
-        .collect();
-
-    if candidates.is_empty() {
-        return run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k);
-    }
-
-    // 首字分数 (1 次推理)
-    let logits1 = run_inference(session, &ctx_prefix)?;
-    let offset1 = (ctx_prefix.len() - 1) * vocab_size;
-
-    let mut by_first: std::collections::HashMap<String, Vec<&String>> = std::collections::HashMap::new();
-    for word in &candidates {
-        if let Some(ch) = word.chars().next() {
-            by_first.entry(ch.to_string()).or_default().push(word);
-        }
-    }
-
-    let mut scored: Vec<(String, f32)> = Vec::new();
-
-    for (first_ch_str, words) in &by_first {
-        let first_id = match vocab.char2id.get(first_ch_str) {
-            Some(&id) => id, None => continue,
-        };
-        let first_score = if offset1 + first_id as usize >= logits1.len() { -50.0 }
-                          else { logits1[offset1 + first_id as usize] };
-
-        if target_len == 2 {
-            // 二字词: [ctx][char1] → 预测 char2
-            let mut ids2 = ctx_prefix.clone();
-            ids2.push(first_id);
-            let logits2 = run_inference(session, &ids2)?;
-            let offset2 = (ids2.len() - 1) * vocab_size;
-
-            for word in words {
-                let chars: Vec<char> = word.chars().collect();
-                if chars.len() != 2 { continue; }
-                let ch2_str = chars[1].to_string();
-                let ch2_score = vocab.char2id.get(&ch2_str)
-                    .map(|&cid| {
-                        let p = offset2 + cid as usize;
-                        if p < logits2.len() { logits2[p] } else { -50.0 }
-                    })
-                    .unwrap_or(-50.0);
-                scored.push((word.to_string(), first_score + ch2_score));
-            }
-        } else {
-            for word in words {
-                let chars: Vec<char> = word.chars().collect();
-                let mut total = first_score;
-                let mut cur_ids = ctx_prefix.clone();
-                cur_ids.push(first_id);
-                for i in 1..target_len {
-                    let logits = run_inference(session, &cur_ids)?;
-                    let lp = (cur_ids.len() - 1) * vocab_size;
-                    let ch_str = chars[i].to_string();
-                    let ch_score = vocab.char2id.get(&ch_str)
-                        .and_then(|&cid| { let p = lp + cid as usize; if p < logits.len() { Some(logits[p]) } else { None } })
-                        .unwrap_or(-50.0);
-                    total += ch_score;
-                    cur_ids.push(vocab.char2id.get(&ch_str).copied().unwrap_or(vocab.unk_id));
-                }
-                scored.push((word.to_string(), total));
-            }
-        }
-    }
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let result: Vec<String> = scored.into_iter().take(top_k).map(|(w, _)| w).collect();
-
-    if result.len() < top_k {
-        let mut r = result;
-        if let Ok(greedy) = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k) {
-            for g in greedy {
-                if !r.contains(&g) { r.push(g); }
-                if r.len() >= top_k { break; }
-            }
-        }
-        Ok(r)
-    } else {
-        Ok(result)
-    }
+    // Fallback: 不应该到达这里 (单音节和2+音节都已处理)
+    Ok(vec![])
 }
 
 /// 贪心生成 (GPT2-Chinese: 纯字符自回归)
