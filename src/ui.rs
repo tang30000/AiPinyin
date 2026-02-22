@@ -483,7 +483,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_LBUTTONDOWN => {
-            // 检测点击是否命中 [JS] 按鈕
+            // 点击客户区 (只有 JS 按钮区域会收到此消息)
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
             if !ptr.is_null() {
                 let state = &*ptr;
@@ -495,6 +495,23 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             LRESULT(0)
+        }
+        WM_NCHITTEST => {
+            // JS 按钮区域 → HTCLIENT (保留点击), 其余 → HTCAPTION (可拖动)
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
+            if !ptr.is_null() {
+                let state = &*ptr;
+                // 将屏幕坐标转为客户区坐标
+                let mut pt = POINT {
+                    x: (lparam.0 & 0xFFFF) as i16 as i32,
+                    y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+                };
+                let _ = ScreenToClient(hwnd, &mut pt);
+                if PtInRect(&state.js_btn_rect, pt).as_bool() {
+                    return LRESULT(1); // HTCLIENT
+                }
+            }
+            LRESULT(2) // HTCAPTION → 可拖动
         }
         WM_KEYDOWN if wparam.0 == 0x1B => { // ESC
             PostQuitMessage(0);
