@@ -26,17 +26,32 @@ def char_pinyin(ch):
     except:
         return None
 
-# 常用前缀字 (与虚词搭配)
-COMMON_CHARS = list(
-    "我你他她它们的了是在和不也都就会能要让把被给对向从"
-    "这那哪谁什么怎为有没到过来去做看说想知道得可以"
+# 从字典自动提取所有常用单字 (权重>=400)
+# 不再手动列举, 确保覆盖全面
+COMMON_CHARS = set()
+for dict_path in DICT_PATHS:
+    if not os.path.exists(dict_path):
+        continue
+    with open(dict_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split(',', 2)
+            if len(parts) >= 3:
+                word = parts[1].strip()
+                try: w = int(parts[2].strip())
+                except: continue
+                if len(word) == 1 and w >= 400:
+                    COMMON_CHARS.add(word)
+    break  # 只读第一个
+
+# 补充一些常用但权重可能不高的字
+COMMON_CHARS.update(list(
+    "我你他她它们这那哪谁什么怎为有没到过来去做看说想"
     "好坏大小多少新旧高低长短远近快慢早晚前后上下左右"
-    "一二三四五六七八九十百千万"
-    "红黄蓝绿白黑"
     "吃喝玩睡走跑站坐开关买卖读写听讲打拿放送接收"
-    "天地人水火山风雨雪花草树"
-    "学工作生活动时间问题方法事情东西地方"
-)
+    "红黄蓝绿白黑强弱美丑对错真假难易"
+))
+
+print(f"常用单字: {len(COMMON_CHARS)} 个")
 
 # 虚词后缀
 SUFFIXES = {
