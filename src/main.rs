@@ -583,14 +583,19 @@ unsafe fn get_caret_screen_pos() -> POINT {
             ..Default::default()
         };
         if GetGUIThreadInfo(thread_id, &mut gi).is_ok() && !gi.hwndCaret.is_invalid() {
-            let mut pt = POINT {
-                x: gi.rcCaret.left,
-                y: gi.rcCaret.bottom,
-            };
-            let _ = ClientToScreen(gi.hwndCaret, &mut pt);
-            // 合理性检查：坐标要在屏幕范围内
-            if pt.x > 0 && pt.y > 0 {
-                return pt;
+            // 光标矩形必须有实际尺寸（防止一些应用返回 0 尺寸的假坐标）
+            let caret_h = gi.rcCaret.bottom - gi.rcCaret.top;
+            let caret_w = gi.rcCaret.right - gi.rcCaret.left;
+            if caret_h > 0 || caret_w > 0 {
+                let mut pt = POINT {
+                    x: gi.rcCaret.left,
+                    y: gi.rcCaret.bottom,  // 光标下沿，候选窗显示在正下方
+                };
+                let _ = ClientToScreen(gi.hwndCaret, &mut pt);
+                // 坐标合理性：必须在屏幕正范围内
+                if pt.x >= 0 && pt.y >= 0 {
+                    return pt;
+                }
             }
         }
     }
@@ -599,7 +604,7 @@ unsafe fn get_caret_screen_pos() -> POINT {
     let mut pt = POINT::default();
     if GetCaretPos(&mut pt).is_ok() && !fg.is_invalid() {
         let mut spt = pt;
-        if ClientToScreen(fg, &mut spt).as_bool() && spt.x > 0 && spt.y > 0 {
+        if ClientToScreen(fg, &mut spt).as_bool() && spt.x >= 0 && spt.y >= 0 {
             return POINT { x: spt.x, y: spt.y + 20 };
         }
     }
@@ -607,5 +612,6 @@ unsafe fn get_caret_screen_pos() -> POINT {
     // ── 策略3: 鼠标光标位置（偏移下方）──
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
-    POINT { x: pt.x, y: pt.y + 24 }
+    POINT { x: pt.x, y: pt.y + 20 }
 }
+

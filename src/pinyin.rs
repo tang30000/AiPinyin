@@ -735,16 +735,52 @@ impl PinyinEngine {
             add!(pfx, 20);
         }
 
-        // 5. 第一音节前缀 (再保底)
-        // 警告: 若第一音节只是单个辅音字母(如"d"), lookup_prefix("d")
-        // 会返回所有以d开头的词，导致"地方""但是""大家"等无关词入侵候选
+        // 5. 第一音节前缀或备用策略 (再保底)
         if result.len() < 9 {
             if let Some(first) = self.syllables.first() {
                 let first_str = first.as_str();
-                // 只有 2+ 字符的前缀才有实际约束效果
-                if first_str != self.raw && first_str.len() >= 2 {
+                if first_str.len() >= 2 && first_str != self.raw {
+                    // 正常多字母前缀：约束效果好，直接查
                     let pfx = dict.lookup_prefix(first);
                     add!(pfx, 15);
+                } else if first_str.len() == 1 && self.syllables.len() >= 2 {
+                    // 单声母开头 (如 "d" in "dwei")：前缀太宽泛，改用:
+                    // a) 第二音节精确匹配 → 提供合法的第二字候选 (为/位/维...)
+                    let second = &self.syllables[1];
+                    let second_exact = dict.lookup(second.as_str());
+                    add!(second_exact, 8);
+                    // b) 前两个声母缩写查找 → 找2字词 (dw→大为/等)
+                    if self.raw.len() >= 2 {
+                        let two_initials: String = self.syllables.iter()
+                            .take(2)
+                            .map(|s| s.chars().next().unwrap_or('_'))
+                            .collect();
+                        let ab2 = dict.lookup_abbreviation(&two_initials);
+                        add!(ab2, 10);
+                    }
+                }
+            }
+        }
+
+        // 6. 终极兜底 — 保证有候选，不让界面消失
+        // 原则：找不到精确匹配 → 宽泛前缀 → 再不行就出单字
+        if result.is_empty() {
+            // 6a. 第一音节宽泛前缀（包括单声母如 "d"）
+            if let Some(first) = self.syllables.first() {
+                let pfx = dict.lookup_prefix(first.as_str());
+                add!(pfx, 9);
+            }
+            // 6b. Raw 前缀
+            if result.is_empty() {
+                let pfx = dict.lookup_prefix(&self.raw);
+                add!(pfx, 9);
+            }
+            // 6c. 最后防线：常用高频单字
+            if result.is_empty() {
+                for ch in &["的", "了", "是", "在", "我", "你", "他", "大", "小", "不"] {
+                    if seen.insert(ch.to_string()) {
+                        result.push(ch.to_string());
+                    }
                 }
             }
         }
