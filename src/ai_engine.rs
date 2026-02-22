@@ -647,72 +647,91 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
 // 词图分词 — 长输入拆分为字典词组
 // ============================================================
 
-/// 词图最短路径分词: 将音节序列拆分为字典中的词组
+/// 词图分词: 将音节序列拆分为字典中的词组
 ///
-/// 例: ["zhi","chi","de","zen","me","yang"] 
-///   → "支持的怎么样" (匹配 支持 + 的 + 怎么 + 样)
+/// 两阶段策略:
+///   1. 优先用多字词(≥2音节)覆盖, 生成词级别候选
+///   2. 无法覆盖的位置用单字填充
 ///
-/// 返回 top-K 完整句子候选 (按词频权重排序)
+/// 例: ["bu","zhi","dao","zhe","ci","xiao","guo","ru","he"]
+///   → "不知道这次效果如何" (不知道+这次+效果+如何)
 pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
     let n = syllables.len();
     if n == 0 { return vec![]; }
 
-    // 获取全局字典
     let dict = match crate::pinyin::get_dict() {
         Some(d) => d,
         None => return vec![],
     };
 
-    // DP: best[i] = Vec<(score, path)> 从位置 i 到末尾的最佳分词
-    // 保留 top-K 条路径
+    // === 第一步: 构建候选词表 ===
+    // word_at[i] = Vec<(end_pos, word, weight, syllable_count)>
+    let mut word_at: Vec<Vec<(usize, String, u32, usize)>> = vec![vec![]; n];
+
+    for i in 0..n {
+        // 多字词: 长度 2~6
+        for length in 2..=std::cmp::min(6, n - i) {
+            let j = i + length;
+            let py_key: String = syllables[i..j].concat();
+            let entries = dict.lookup(&py_key);
+            if entries.is_empty() { continue; }
+
+            // 按权重排序, 取 top-3
+            let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
+            sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
+            for entry in sorted.iter().take(3) {
+                word_at[i].push((j, entry.word.clone(), entry.weight, length));
+            }
+        }
+
+        // 单字: 只取权重最高的 top-3
+        {
+            let py_key = &syllables[i];
+            let entries = dict.lookup(py_key);
+            if !entries.is_empty() {
+                let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
+                sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
+                for entry in sorted.iter().take(3) {
+                    word_at[i].push((i + 1, entry.word.clone(), entry.weight, 1));
+                }
+            }
+        }
+    }
+
+    // === 第二步: DP 寻找最优路径 ===
+    // best[i] = Vec<(score, path)>  从位置 i 到末尾的最佳分词
     let mut best: Vec<Option<Vec<(i64, Vec<String>)>>> = vec![None; n + 1];
     best[n] = Some(vec![(0, vec![])]);
 
     for i in (0..n).rev() {
         let mut candidates: Vec<(i64, Vec<String>)> = Vec::new();
 
-        // 尝试匹配长度 1~min(6, n-i) 的词组
-        for length in 1..=std::cmp::min(6, n - i) {
-            let j = i + length;
+        for &(j, ref word, weight, syl_count) in &word_at[i] {
             let rest = match &best[j] {
                 Some(paths) => paths,
                 None => continue,
             };
 
-            // 拼接这几个音节
-            let py_key: String = syllables[i..j].concat();
-            let entries = dict.lookup(&py_key);
-            if entries.is_empty() { continue; }
+            // 分数: 多字词大幅加分
+            let score = weight as i64 + (syl_count as i64) * 500;
 
-            // 取权重最高的 top-3 词 (不只 top-1, 让 AI 做最终选择)
-            let mut sorted_entries: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
-            sorted_entries.sort_by(|a, b| b.weight.cmp(&a.weight));
-            let top_words: Vec<_> = sorted_entries.iter().take(3).collect();
-
-            let length_bonus = (length as i64) * 200;
-
-            for entry in &top_words {
-                let word = &entry.word;
-                let score = entry.weight as i64 + length_bonus;
-
-                for (rest_score, rest_path) in rest.iter().take(2) {
-                    let total = score + rest_score;
-                    let mut path = vec![word.clone()];
-                    path.extend_from_slice(rest_path);
-                    candidates.push((total, path));
-                }
+            for (rest_score, rest_path) in rest.iter().take(3) {
+                let total = score + rest_score;
+                let mut path = vec![word.clone()];
+                path.extend_from_slice(rest_path);
+                candidates.push((total, path));
             }
         }
 
         if !candidates.is_empty() {
-            // 按分数降序排序, 保留 top-K
             candidates.sort_by(|a, b| b.0.cmp(&a.0));
-            candidates.dedup_by(|a, b| {
-                let sa: String = a.1.concat();
-                let sb: String = b.1.concat();
-                sa == sb
+            // 去重 (相同句子只保留最高分)
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|(_, path)| {
+                let key: String = path.concat();
+                seen.insert(key)
             });
-            candidates.truncate(8);
+            candidates.truncate(15);
             best[i] = Some(candidates);
         }
     }
@@ -720,6 +739,7 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
     match &best[0] {
         Some(paths) => {
             paths.iter()
+                .take(top_k)
                 .map(|(_, words)| words.concat())
                 .collect()
         }
