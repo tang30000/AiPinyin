@@ -516,14 +516,17 @@ fn run_predict_greedy(
 
 
 /// 拼音约束的 top-K 选取
+///
+/// 优先级：pinyin2char_ids（精确拼音）→ initial_chars（声母约束）→ 无约束
+/// 声母约束确保 "d" 之类的半音节不会跑出完全无关的字（如"大家"出现在"dwei"候选）
 fn get_top_k_constrained(
     logits: &[f32],
     vocab: &VocabIndex,
     pinyin: &str,
     top_k: usize,
 ) -> Vec<(i64, String)> {
+    // 1. 精确拼音匹配（最优先）
     if let Some(candidate_ids) = vocab.pinyin2char_ids.get(pinyin) {
-        // 在候选中选 top-K
         let mut scored: Vec<(i64, f32)> = candidate_ids.iter()
             .filter_map(|&id| {
                 let idx = id as usize;
@@ -531,22 +534,46 @@ fn get_top_k_constrained(
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        scored.iter().take(top_k)
+        return scored.iter().take(top_k)
             .filter_map(|(id, _)| vocab.id2char.get(id).map(|ch| (*id, ch.clone())))
-            .collect()
-    } else {
-        // 无约束 fallback
-        let mut scored: Vec<(i64, f32)> = logits.iter().enumerate()
-            .filter(|(i, _)| *i >= 4)
-            .map(|(i, &s)| (i as i64, s))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        scored.iter().take(top_k)
-            .filter_map(|(id, _)| vocab.id2char.get(id).map(|ch| (*id, ch.clone())))
-            .collect()
     }
+
+    // 2. 声母约束 fallback（单个辅音字母，如 "d" "b" "zh"）
+    //    避免完全无关的字（如 GPT-2 根据上下文预测"大家"而非"d"声母的字）
+    let initial_key: Option<char> = if pinyin.len() == 1 {
+        pinyin.chars().next().filter(|c| "bpmfdtnlgkhjqxzcsryw".contains(*c))
+    } else if pinyin.len() == 2 && pinyin.ends_with('h') {
+        // zh/ch/sh 复合声母 → 用首字母做 initial_chars 查询
+        pinyin.chars().next().filter(|c| "zcs".contains(*c))
+    } else {
+        None
+    };
+
+    if let Some(init) = initial_key {
+        if let Some(candidate_ids) = vocab.initial_chars.get(&init) {
+            let mut scored: Vec<(i64, f32)> = candidate_ids.iter()
+                .filter_map(|&id| {
+                    let idx = id as usize;
+                    if idx < logits.len() { Some((id, logits[idx])) } else { None }
+                })
+                .collect();
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            return scored.iter().take(top_k)
+                .filter_map(|(id, _)| vocab.id2char.get(id).map(|ch| (*id, ch.clone())))
+                .collect();
+        }
+    }
+
+    // 3. 真正无约束 fallback（极少触发，仅当声母也查不到时）
+    let mut scored: Vec<(i64, f32)> = logits.iter().enumerate()
+        .filter(|(i, _)| *i >= 4)
+        .map(|(i, &s)| (i as i64, s))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.iter().take(top_k)
+        .filter_map(|(id, _)| vocab.id2char.get(id).map(|ch| (*id, ch.clone())))
+        .collect()
 }
 
 /// 上下文感知重排

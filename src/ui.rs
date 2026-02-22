@@ -13,6 +13,7 @@ use log::info;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -242,8 +243,6 @@ impl CandidateWindow {
         let hwnd = unsafe {
             let hinstance = GetModuleHandleW(None)?;
             let hinstance_val: HINSTANCE = hinstance.into();
-            // 不用 WS_EX_LAYERED：GDI 绘制与分层窗口不兼容
-            // 圆角效果由 SetWindowRgn 实现，不透明即可
             let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
             let hwnd = CreateWindowExW(
@@ -256,6 +255,16 @@ impl CandidateWindow {
                 hinstance_val,
                 Some(state_ptr as *const c_void),
             )?;
+
+            // DWM 系统级圆角（Win11 DirectComposition 渲染，完全无锯齿）
+            // DWMWCP_ROUND = 2；Win10 上该调用无害，静默忽略
+            let preference: u32 = 2u32; // DWMWCP_ROUND
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &preference as *const u32 as *const core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
 
             hwnd
         };
@@ -417,9 +426,7 @@ impl CandidateWindow {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
 
-        let rgn = CreateRoundRectRgn(0, 0, w, h, state.theme.win_radius, state.theme.win_radius);
-        SetWindowRgn(self.hwnd, rgn, TRUE);
-
+        // DWM 圆角已在窗口创建时设置，不使用 CreateRoundRectRgn（其边缘有锯齿）
         // RedrawWindow 立即同步绘制，不依赖消息队列
         let _ = RedrawWindow(
             self.hwnd, None, None,
