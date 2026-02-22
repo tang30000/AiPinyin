@@ -208,9 +208,78 @@ pub struct Candidate {
 
 static DICT: OnceLock<Dictionary> = OnceLock::new();
 
+/// AI 生成词缓存 (运行时动态添加)
+static AI_CACHE: std::sync::LazyLock<std::sync::RwLock<HashMap<String, Vec<Candidate>>>>
+    = std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
 /// 获取全局字典引用 (供 ai_engine 词图分词使用)
 pub fn get_dict() -> Option<&'static Dictionary> {
     DICT.get()
+}
+
+/// 缓存 AI 生成的长词到内存 + 磁盘
+pub fn cache_ai_word(pinyin: &str, word: &str) {
+    if pinyin.is_empty() || word.is_empty() { return; }
+
+    // 检查主字典是否已有
+    if let Some(dict) = DICT.get() {
+        let entries = dict.lookup(pinyin);
+        if entries.iter().any(|c| c.word == word) { return; }
+    }
+
+    // 检查缓存是否已有
+    {
+        let cache = AI_CACHE.read().unwrap();
+        if let Some(entries) = cache.get(pinyin) {
+            if entries.iter().any(|c| c.word == word) { return; }
+        }
+    }
+
+    // 写入内存缓存
+    {
+        let mut cache = AI_CACHE.write().unwrap();
+        cache.entry(pinyin.to_string()).or_default().push(Candidate {
+            word: word.to_string(),
+            weight: 880,
+            pinyin: pinyin.to_string(),
+        });
+    }
+
+    eprintln!("[Dict] 📦 缓存AI词: {} → {}", pinyin, word);
+
+    // 追加到磁盘 dict.txt
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let path = dir.join("dict.txt");
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                use std::io::Write;
+                let _ = writeln!(f, "{},{},880", pinyin, word);
+            }
+        }
+    }
+}
+
+/// 从缓存补充查询结果
+pub fn lookup_with_cache(pinyin: &str) -> Vec<Candidate> {
+    let mut result = Vec::new();
+    
+    // 主字典
+    if let Some(dict) = DICT.get() {
+        result.extend_from_slice(dict.lookup(pinyin));
+    }
+    
+    // AI 缓存
+    if let Ok(cache) = AI_CACHE.read() {
+        if let Some(entries) = cache.get(pinyin) {
+            for c in entries {
+                if !result.iter().any(|r| r.word == c.word) {
+                    result.push(c.clone());
+                }
+            }
+        }
+    }
+    
+    result
 }
 
 pub struct Dictionary {

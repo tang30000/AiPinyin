@@ -186,6 +186,10 @@ unsafe fn cb_process_key(vkey: u32) {
                 // 自学习：记录 (拼音 → 选词)
                 if !raw_before.is_empty() {
                     state.user_dict.learn(&raw_before, &text);
+                    // 3+字词自动缓存到主字典 (下次词图直接命中)
+                    if text.chars().count() >= 3 {
+                        crate::pinyin::cache_ai_word(&raw_before, &text);
+                    }
                 }
                 eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                     send_unicode_text(&text));
