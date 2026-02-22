@@ -606,14 +606,46 @@ unsafe fn trigger_next_prediction(state: &mut ImeState) {
     });
 }
 
+
+/// 多策略获取光标屏幕坐标
 ///
-/// 策略1: GetGUIThreadInfo — 适用于普通权限应用 (记事本、浏览器等)
-/// 策略2: GetCaretPos + ClientToScreen — 适用于同进程窗口
-/// 策略3: 鼠标位置 — 通用回退（鼠标通常在正在输入的文字旁边）
+/// 策略1: OBJID_CARET (Accessibility) — 精确屏幕坐标，适用于所有支持 MSAA 的应用
+/// 策略2: GetGUIThreadInfo — 旧式 Win32 Caret API（记事本/WordPad 等）
+/// 策略3: 鼠标位置 — 通用回退
 pub(crate) unsafe fn get_caret_screen_pos() -> POINT {
+    use windows::Win32::UI::Accessibility::{
+        AccessibleObjectFromWindow, IAccessible,
+    };
+
     let fg = GetForegroundWindow();
 
-    // ── 策略1: GetGUIThreadInfo ──
+    // ── 策略1: Accessibility OBJID_CARET ──────────────────────────────
+    // OBJID_CARET = -8i32 (0xFFFFFFF8)
+    const OBJID_CARET: u32 = 0xFFFFFFF8u32;
+    if !fg.is_invalid() {
+        let mut pacc: Option<IAccessible> = None;
+        if AccessibleObjectFromWindow(
+            fg,
+            OBJID_CARET,
+            &IAccessible::IID,
+            &mut pacc as *mut _ as *mut *mut core::ffi::c_void,
+        ).is_ok() {
+            if let Some(acc) = pacc {
+                let child = windows_core::VARIANT::from(0i32);
+                let mut left = 0i32;
+                let mut top = 0i32;
+                let mut width = 0i32;
+                let mut height = 0i32;
+                if acc.accLocation(&mut left, &mut top, &mut width, &mut height, &child).is_ok()
+                    && (left != 0 || top != 0)
+                {
+                    return POINT { x: left, y: top + height };
+                }
+            }
+        }
+    }
+
+    // ── 策略2: GetGUIThreadInfo (旧式 Win32 Caret) ─────────────────────
     if !fg.is_invalid() {
         let thread_id = GetWindowThreadProcessId(fg, None);
         let mut gi = GUITHREADINFO {
@@ -621,38 +653,22 @@ pub(crate) unsafe fn get_caret_screen_pos() -> POINT {
             ..Default::default()
         };
         if GetGUIThreadInfo(thread_id, &mut gi).is_ok() && !gi.hwndCaret.is_invalid() {
-            let caret_h = gi.rcCaret.bottom - gi.rcCaret.top;
-            let caret_w = gi.rcCaret.right - gi.rcCaret.left;
-            if caret_h > 0 || caret_w > 0 {
-                let mut pt = POINT {
-                    x: gi.rcCaret.left,
-                    y: gi.rcCaret.bottom,
-                };
+            let h = gi.rcCaret.bottom - gi.rcCaret.top;
+            let w = gi.rcCaret.right - gi.rcCaret.left;
+            if h > 0 || w > 0 {
+                let mut pt = POINT { x: gi.rcCaret.left, y: gi.rcCaret.bottom };
                 let _ = ClientToScreen(gi.hwndCaret, &mut pt);
-                if pt.x >= 0 && pt.y >= 0 {
-                    // 合理性检验：对比鼠标位置。若偏差 > 500px 则很可能是虚假坐标
-                    let mut mouse = POINT::default();
-                    let _ = GetCursorPos(&mut mouse);
-                    let dy = (pt.y - mouse.y).abs();
-                    if dy < 500 {
-                        return pt;
-                    }
-                    // dy >= 500：caret 坐标可疑，回落到鼠标策略
+                // 合理性检验：与鼠标偏差不超过 400px
+                let mut mouse = POINT::default();
+                let _ = GetCursorPos(&mut mouse);
+                if pt.x >= 0 && pt.y >= 0 && (pt.y - mouse.y).abs() < 400 {
+                    return pt;
                 }
             }
         }
     }
 
-    // ── 策略2: GetCaretPos (同线程)──
-    let mut pt = POINT::default();
-    if GetCaretPos(&mut pt).is_ok() && !fg.is_invalid() {
-        let mut spt = pt;
-        if ClientToScreen(fg, &mut spt).as_bool() && spt.x >= 0 && spt.y >= 0 {
-            return POINT { x: spt.x, y: spt.y + 20 };
-        }
-    }
-
-    // ── 策略3: 鼠标光标位置（最可靠的回退）──
+    // ── 策略3: 鼠标光标位置 ────────────────────────────────────────────
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
     POINT { x: pt.x, y: pt.y + 20 }
