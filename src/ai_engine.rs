@@ -15,6 +15,19 @@
 
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+// 全局 jieba 实例（懒加载，只初始化一次）
+static JIEBA: OnceLock<jieba_rs::Jieba> = OnceLock::new();
+
+fn get_jieba() -> &'static jieba_rs::Jieba {
+    JIEBA.get_or_init(|| {
+        eprintln!("[词图] jieba 初始化...");
+        let j = jieba_rs::Jieba::new();
+        eprintln!("[词图] jieba 就绪 (35万词典)");
+        j
+    })
+}
 
 // ============================================================
 // 上下文缓冲区
@@ -887,10 +900,14 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
         Some(d) => d,
         None => return vec![],
     };
+    let jieba = get_jieba();
 
     // === 第一步: 构建候选词表 ===
-    // word_at[i] = Vec<(end_pos, word, weight, syllable_count)>
-    let mut word_at: Vec<Vec<(usize, String, u32, usize)>> = vec![vec![]; n];
+    // word_at[i] = Vec<(end_pos, word, combined_score, syllable_count)>
+    //
+    // combined_score = 拼音词典权重 + jieba词频加成
+    // jieba词频加成: 若 jieba 认为该词是独立词汇，加权最多 +3000
+    let mut word_at: Vec<Vec<(usize, String, i64, usize)>> = vec![vec![]; n];
 
     for i in 0..n {
         // 多字词: 长度 2~6
@@ -900,15 +917,17 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
             let entries = dict.lookup(&py_key);
             if entries.is_empty() { continue; }
 
-            // 按权重排序, 取 top-3
             let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
             sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
             for entry in sorted.iter().take(5) {
-                word_at[i].push((j, entry.word.clone(), entry.weight, length));
+                // jieba 词频增强: 用 jieba 对该词分词，若结果是单词（未被拆开）说明是高频词
+                let jieba_boost = jieba_word_score(jieba, &entry.word);
+                let score = entry.weight as i64 + jieba_boost;
+                word_at[i].push((j, entry.word.clone(), score, length));
             }
         }
 
-        // 单字: 只取权重最高的 top-3
+        // 单字
         {
             let py_key = &syllables[i];
             let entries = dict.lookup(py_key);
@@ -916,31 +935,32 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
                 let mut sorted: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
                 sorted.sort_by(|a, b| b.weight.cmp(&a.weight));
                 for entry in sorted.iter().take(5) {
-                    word_at[i].push((i + 1, entry.word.clone(), entry.weight, 1));
+                    let jieba_boost = jieba_word_score(jieba, &entry.word) / 4; // 单字 jieba 加成缩减
+                    let score = entry.weight as i64 + jieba_boost;
+                    word_at[i].push((i + 1, entry.word.clone(), score, 1));
                 }
             }
         }
     }
 
     // === 第二步: DP 寻找最优路径 ===
-    // best[i] = Vec<(score, path)>  从位置 i 到末尾的最佳分词
     let mut best: Vec<Option<Vec<(i64, Vec<String>)>>> = vec![None; n + 1];
     best[n] = Some(vec![(0, vec![])]);
 
     for i in (0..n).rev() {
         let mut candidates: Vec<(i64, Vec<String>)> = Vec::new();
 
-        for &(j, ref word, weight, syl_count) in &word_at[i] {
+        for &(j, ref word, word_score, syl_count) in &word_at[i] {
             let rest = match &best[j] {
                 Some(paths) => paths,
                 None => continue,
             };
 
-            // 分数: 多字词大幅加分, 单字无bonus (避免单字路径淹没词组)
+            // 多字词大幅加分（避免单字路径淹没词组）
             let score = if syl_count >= 2 {
-                weight as i64 + (syl_count as i64) * 1000
+                word_score + (syl_count as i64) * 1000
             } else {
-                weight as i64  // 单字只有权重, 无bonus
+                word_score
             };
 
             for (rest_score, rest_path) in rest.iter().take(3) {
@@ -953,7 +973,6 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
 
         if !candidates.is_empty() {
             candidates.sort_by(|a, b| b.0.cmp(&a.0));
-            // 去重 (相同句子只保留最高分)
             let mut seen = std::collections::HashSet::new();
             candidates.retain(|(_, path)| {
                 let key: String = path.concat();
@@ -972,6 +991,27 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
                 .collect()
         }
         None => vec![],
+    }
+}
+
+/// 用 jieba 评估一个词的分词质量
+///
+/// 如果 jieba 把整个词当单一词汇（不拆分），说明它是高频、正规词汇，返回加分。
+/// 加分范围 0~3000，与词长和 jieba 置信度相关。
+fn jieba_word_score(jieba: &jieba_rs::Jieba, word: &str) -> i64 {
+    let char_count = word.chars().count();
+    if char_count == 1 {
+        // 单字不需要 jieba 验证
+        return 0;
+    }
+    // 用 jieba 对词分词，若输出仍为一整个词说明 jieba 认可它
+    let segments = jieba.cut(word, false);
+    if segments.len() == 1 && segments[0] == word {
+        // jieba 认为这就是一个完整词 → 高频词加成
+        (char_count as i64).min(4) * 750  // 2字:1500, 3字:2250, 4+字:3000
+    } else {
+        // jieba 把它拆开了 → 低频或非词，不加分
+        0
     }
 }
 
