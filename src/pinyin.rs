@@ -484,21 +484,19 @@ fn load_dictionary(extra_names: &[String]) -> Dictionary {
 
     // 优先加载二进制缓存 (dict.bin)
     let bin_path = exe_dir.as_ref().map(|d| d.join("dict.bin"));
-    if extra_names.is_empty() {
-        if let Some(ref bp) = bin_path {
-            if bp.exists() {
-                let start = std::time::Instant::now();
-                match std::fs::read(bp) {
-                    Ok(bytes) => match bincode::deserialize::<Dictionary>(&bytes) {
-                        Ok(d) => {
-                            eprintln!("[Dict] 二进制缓存加载: {:?} ({} 条)",
-                                start.elapsed(), d.all.len());
-                            return d;
-                        }
-                        Err(e) => eprintln!("[Dict] bin 反序列化失败: {}, 回退文本", e),
+    if let Some(ref bp) = bin_path {
+        if bp.exists() {
+            let start = std::time::Instant::now();
+            match std::fs::read(bp) {
+                Ok(bytes) => match bincode::deserialize::<Dictionary>(&bytes) {
+                    Ok(d) => {
+                        eprintln!("[Dict] 二进制缓存加载: {:?} ({} 条)",
+                            start.elapsed(), d.all.len());
+                        return d;
                     }
-                    Err(e) => eprintln!("[Dict] bin 读取失败: {}, 回退文本", e),
+                    Err(e) => eprintln!("[Dict] bin 反序列化失败: {}, 回退文本", e),
                 }
+                Err(e) => eprintln!("[Dict] bin 读取失败: {}, 回退文本", e),
             }
         }
     }
@@ -560,20 +558,18 @@ fn load_dictionary(extra_names: &[String]) -> Dictionary {
         }
     }
 
-    // 自动生成二进制缓存 (仅基础词典, 无额外词库时)
-    if extra_names.is_empty() {
-        if let Some(ref bp) = bin_path {
-            let start = std::time::Instant::now();
-            match bincode::serialize(&dict) {
-                Ok(bytes) => {
-                    match std::fs::write(bp, &bytes) {
-                        Ok(_) => eprintln!("[Dict] 已生成二进制缓存: {:?} ({:.1} MB, {:?})",
-                            bp, bytes.len() as f64 / 1_048_576.0, start.elapsed()),
-                        Err(e) => eprintln!("[Dict] 写入 bin 失败: {}", e),
-                    }
+    // 自动生成二进制缓存
+    if let Some(ref bp) = bin_path {
+        let start = std::time::Instant::now();
+        match bincode::serialize(&dict) {
+            Ok(bytes) => {
+                match std::fs::write(bp, &bytes) {
+                    Ok(_) => eprintln!("[Dict] 已生成二进制缓存: {:?} ({:.1} MB, {:?})",
+                        bp, bytes.len() as f64 / 1_048_576.0, start.elapsed()),
+                    Err(e) => eprintln!("[Dict] 写入 bin 失败: {}", e),
                 }
-                Err(e) => eprintln!("[Dict] 序列化失败: {}", e),
             }
+            Err(e) => eprintln!("[Dict] 序列化失败: {}", e),
         }
     }
 
