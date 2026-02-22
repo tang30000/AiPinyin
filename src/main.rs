@@ -581,8 +581,13 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 
 /// 上屏后异步预测下一词，结果回来直接走 WM_AI_RESULT 更新候选窗
 unsafe fn trigger_next_prediction(state: &mut ImeState) {
-    if !state.cfg.ai.predict_next { return; } // 配置未开启，直接跳过
-    if !state.ai.is_available() { return; }
+    if !state.cfg.ai.predict_next {
+        state.all_candidates.clear();
+        state.current_candidates.clear();
+        state.cand_win.hide();
+        return;
+    }
+    if !state.ai.is_available() { state.cand_win.hide(); return; }
     let hwnd_raw = state.cand_win.hwnd().0 as isize;
     state.ai_generation += 1;
     let gen = state.ai_generation;
