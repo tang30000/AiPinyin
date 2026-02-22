@@ -328,26 +328,42 @@ impl CandidateWindow {
         self.hwnd
     }
 
-    /// 在指定屏幕坐标显示并立即绘制（自动防止超出屏幕）
+    /// 在指定屏幕坐标显示并立即绘制（多显示器感知 + 任务栏回避）
     pub fn show(&self, x: i32, y: i32) {
         unsafe {
-            // 获取窗口尺寸
             let mut wnd_rc = RECT::default();
             let _ = GetWindowRect(self.hwnd, &mut wnd_rc);
             let wnd_w = wnd_rc.right - wnd_rc.left;
             let wnd_h = wnd_rc.bottom - wnd_rc.top;
 
-            // 获取屏幕尺寸
-            let scr_w = GetSystemMetrics(SM_CXSCREEN);
-            let scr_h = GetSystemMetrics(SM_CYSCREEN);
+            // 多显示器感知：获取光标所在显示器的可用工作区（去掉任务栏）
+            let caret_pt = POINT { x, y };
+            let monitor = MonitorFromPoint(caret_pt, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let work_rc = if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+                mi.rcWork
+            } else {
+                RECT {
+                    left: 0, top: 0,
+                    right: GetSystemMetrics(SM_CXSCREEN),
+                    bottom: GetSystemMetrics(SM_CYSCREEN),
+                }
+            };
 
-            // 边界钳位: 不超出屏幕
+            // 水平：右侧不超出工作区
             let mut fx = x;
+            if fx + wnd_w > work_rc.right { fx = work_rc.right - wnd_w; }
+            if fx < work_rc.left { fx = work_rc.left; }
+
+            // 垂直：下方优先；超出底部则翻转到光标上方
             let mut fy = y;
-            if fx + wnd_w > scr_w { fx = scr_w - wnd_w; }
-            if fy + wnd_h > scr_h { fy = y - wnd_h - 28; } // 超出底部→显示在光标上方
-            if fx < 0 { fx = 0; }
-            if fy < 0 { fy = 0; }
+            if fy + wnd_h > work_rc.bottom {
+                fy = y - wnd_h - 30; // 光标上方
+            }
+            if fy < work_rc.top { fy = work_rc.top; }
 
             let _ = SetWindowPos(
                 self.hwnd, HWND_TOPMOST, fx, fy, 0, 0,
@@ -356,6 +372,7 @@ impl CandidateWindow {
             let _ = UpdateWindow(self.hwnd);
         }
     }
+
 
     /// 隐藏窗口，同时清空状态
     pub fn hide(&self) {

@@ -736,9 +736,13 @@ impl PinyinEngine {
         }
 
         // 5. 第一音节前缀 (再保底)
+        // 警告: 若第一音节只是单个辅音字母(如"d"), lookup_prefix("d")
+        // 会返回所有以d开头的词，导致"地方""但是""大家"等无关词入侵候选
         if result.len() < 9 {
             if let Some(first) = self.syllables.first() {
-                if first.as_str() != self.raw {
+                let first_str = first.as_str();
+                // 只有 2+ 字符的前缀才有实际约束效果
+                if first_str != self.raw && first_str.len() >= 2 {
                     let pfx = dict.lookup_prefix(first);
                     add!(pfx, 15);
                 }
