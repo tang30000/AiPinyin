@@ -219,13 +219,14 @@ fn open_settings_inner() -> Result<(), Box<dyn std::error::Error>> {
     use tao::event::{Event, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tao::platform::run_return::EventLoopExtRunReturn;
     use tao::window::WindowBuilder;
     use wry::WebViewBuilder;
 
-    let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
+    let mut event_loop = EventLoopBuilder::new().with_any_thread(true).build();
     let window = WindowBuilder::new()
         .with_title("AiPinyin 设置")
-        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 680.0))
+        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 720.0))
         .with_resizable(true)
         .build(&event_loop)?;
 
@@ -276,13 +277,13 @@ fn open_settings_inner() -> Result<(), Box<dyn std::error::Error>> {
     // 防止 webview 被 drop
     let _webview = webview;
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run_return(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
-        match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *control_flow = ControlFlow::Exit;
-            }
-            _ => {}
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+            *control_flow = ControlFlow::Exit;
         }
     });
+
+    eprintln!("[Settings] 设置窗口已关闭");
+    Ok(())
 }

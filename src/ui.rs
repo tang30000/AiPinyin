@@ -168,6 +168,8 @@ struct WindowState {
     font_pinyin: HFONT,
     font_cand: HFONT,
     font_idx: HFONT,
+    /// JS 指示灯小字体
+    font_small: HFONT,
     /// [JS] 按鈕在客户区的位置
     js_btn_rect: RECT,
     /// [⚙] 设置按钮区域
@@ -194,6 +196,7 @@ impl WindowState {
                 font_pinyin: mk_font(theme.pinyin_sz, FW_NORMAL.0 as i32),
                 font_cand:   mk_font(theme.font_sz,   FW_MEDIUM.0 as i32),
                 font_idx:    mk_font(theme.font_sz,   FW_NORMAL.0 as i32),
+                font_small:  mk_font(12,               FW_NORMAL.0 as i32),
                 theme,
                 js_btn_rect: RECT::default(),
                 settings_btn_rect: RECT::default(),
@@ -663,6 +666,7 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
         };
 
         // JS 指示灯 (小, 在 ⚙ 左边)
+        SelectObject(hdc, state.font_small);
         let js_label: Vec<u16> = "JS".encode_utf16().collect();
         let mut jsz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &js_label, &mut jsz);
