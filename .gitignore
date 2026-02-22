@@ -55,4 +55,4 @@ __pycache__/
 /pinyin2id.json
 /char2id.json
 /vocab_meta.json
-tools/scel_cache/
+tools/
