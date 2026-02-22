@@ -13,8 +13,8 @@
     /* 窗口背景色（深灰蓝）  */
     --text-color: #C8CCD8;
     /* 候选汉字颜色           */
-    --pinyin-color: #6E738C;
-    /* 上排拼音小字颜色       */
+    --pinyin-color: #A9B1D6;
+    /* 上排拼音小字颜色（亮）  */
     --index-color: #82869C;
     /* 序号颜色               */
 
@@ -25,9 +25,9 @@
     /* 选中项文字颜色         */
 
     /* ── 字号 ── */
-    --font-size: 20px;
+    --font-size: 24px;
     /* 候选汉字字号           */
-    --pinyin-size: 20px;
+    --pinyin-size: 18px;
     /* 上排拼音字号           */
 
     /* ── 形状 ── */

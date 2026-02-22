@@ -438,14 +438,10 @@ pub(crate) unsafe fn show_current_page(state: &mut ImeState, raw: &str) {
 
     let page_num = offset / PAGE_SIZE + 1;
     let total_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
-    let label = if total_pages > 1 {
-        format!("{} ({}/{})", raw, page_num, total_pages)
-    } else {
-        raw.to_string()
-    };
+    let page_info = if total_pages > 1 { Some((page_num, total_pages)) } else { None };
 
     let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
-    state.cand_win.update_candidates(&label, &refs);
+    state.cand_win.update_candidates_with_page(raw, &refs, page_info);
 }
 
 /// 下一页

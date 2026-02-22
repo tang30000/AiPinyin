@@ -174,6 +174,8 @@ struct WindowState {
     settings_btn_rect: RECT,
     /// 当前是否有激活的插件
     plugins_active: bool,
+    /// 翻页信息: (current_page, total_pages)  None=不需要显示
+    page_info: Option<(usize, usize)>,
 }
 
 impl WindowState {
@@ -196,6 +198,7 @@ impl WindowState {
                 js_btn_rect: RECT::default(),
                 settings_btn_rect: RECT::default(),
                 plugins_active: false,
+                page_info: None,
             }
         }
     }
@@ -278,6 +281,11 @@ impl CandidateWindow {
 
     /// 一站式更新：设置拼音 + 候选词 + 定位光标 + 显示
     pub fn update_candidates(&self, raw: &str, candidates: &[&str]) {
+        self.update_candidates_with_page(raw, candidates, None);
+    }
+
+    /// 更新候选词 + 翻页信息
+    pub fn update_candidates_with_page(&self, raw: &str, candidates: &[&str], page_info: Option<(usize, usize)>) {
         if candidates.is_empty() {
             self.hide();
             return;
@@ -287,6 +295,7 @@ impl CandidateWindow {
             state.raw_input = raw.to_string();
             state.candidates = candidates.iter().map(|s| s.to_string()).collect();
             state.selected = 0;
+            state.page_info = page_info;
             self.resize_and_redraw(state);
         }
     }
@@ -634,57 +643,52 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
     FillRect(hdc, &rc, bg_brush);
     let _ = DeleteObject(bg_brush);
 
-    // ── [JS] 按鈕（右上角）──
+    // ── 右上角按钮: ⚙ 设置(主) + JS 指示灯(小) ──
     {
-        SelectObject(hdc, state.font_pinyin);
-        let label_w: Vec<u16> = "[JS]".encode_utf16().collect();
-        let mut lsz = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, &label_w, &mut lsz);
+        let btn_pad = 3i32;
 
-        let btn_pad = 4i32;
-        let bx = rc.right - lsz.cx - btn_pad * 2 - state.theme.pad_h;
-        let by = PAD_TOP - 1;
+        // ⚙ 设置按钮 (最右)
+        SelectObject(hdc, state.font_idx);
+        let gear: Vec<u16> = "⚙".encode_utf16().collect();
+        let mut gsz = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &gear, &mut gsz);
+        let gx = rc.right - gsz.cx - btn_pad * 2 - state.theme.pad_h;
+        let gy = PAD_TOP;
+        SetTextColor(hdc, state.theme.index);
+        SetBkMode(hdc, TRANSPARENT);
+        let _ = TextOutW(hdc, gx, gy, &gear);
+        state.settings_btn_rect = RECT {
+            left: gx - btn_pad,  top: gy - btn_pad,
+            right: gx + gsz.cx + btn_pad, bottom: gy + gsz.cy + btn_pad,
+        };
 
-        // 抽屉窗口对 paint() 昦4个參数，用 state.js_btn_rect 存储
+        // JS 指示灯 (小, 在 ⚙ 左边)
+        let js_label: Vec<u16> = "JS".encode_utf16().collect();
+        let mut jsz = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &js_label, &mut jsz);
+        let jx = gx - jsz.cx - btn_pad * 3;
+        let jy = gy;
+
         state.js_btn_rect = RECT {
-            left: bx - btn_pad,
-            top: by - btn_pad,
-            right: bx + lsz.cx + btn_pad,
-            bottom: by + lsz.cy + btn_pad,
+            left: jx - btn_pad, top: jy - btn_pad,
+            right: jx + jsz.cx + btn_pad, bottom: jy + jsz.cy + btn_pad,
         };
 
         if state.plugins_active {
-            // 激活：亮蓝圆角背景
             let b = CreateSolidBrush(state.theme.hl_bg);
             let old = SelectObject(hdc, b);
             let p = SelectObject(hdc, GetStockObject(NULL_PEN));
             let _ = RoundRect(hdc,
                 state.js_btn_rect.left, state.js_btn_rect.top,
-                state.js_btn_rect.right, state.js_btn_rect.bottom, 5, 5);
+                state.js_btn_rect.right, state.js_btn_rect.bottom, 4, 4);
             SelectObject(hdc, p);
             SelectObject(hdc, old);
             let _ = DeleteObject(b);
             SetTextColor(hdc, state.theme.hl_text);
         } else {
-            // 未激活：灰色文字
             SetTextColor(hdc, state.theme.index);
         }
-        SetBkMode(hdc, TRANSPARENT);
-        let _ = TextOutW(hdc, bx, by, &label_w);
-
-        // ⚙ 设置按钮 (在 JS 左边)
-        let gear: Vec<u16> = "⚙".encode_utf16().collect();
-        let mut gsz = SIZE::default();
-        GetTextExtentPoint32W(hdc, &gear, &mut gsz);
-        let gx = bx - gsz.cx - btn_pad * 3;
-        SetTextColor(hdc, state.theme.index);
-        let _ = TextOutW(hdc, gx, by, &gear);
-        state.settings_btn_rect = RECT {
-            left: gx - btn_pad,
-            top: by - btn_pad,
-            right: gx + gsz.cx + btn_pad,
-            bottom: by + gsz.cy + btn_pad,
-        };
+        let _ = TextOutW(hdc, jx, jy, &js_label);
     }
 
     if state.candidates.is_empty() { return; }
@@ -749,6 +753,17 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
         SetTextColor(hdc, if is_sel { state.theme.hl_text } else { state.theme.text });
         let _ = TextOutW(hdc, x, text_y, &cw);
         x += csz.cx + ITEM_GAP;
+    }
+
+    // ── 翻页箭头 (在候选词最后) ──
+    if let Some((page, total)) = state.page_info {
+        SelectObject(hdc, state.font_idx);
+        let arrows = format!("{}/{}", page, total);
+        let aw: Vec<u16> = arrows.encode_utf16().collect();
+        let mut asz = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &aw, &mut asz);
+        SetTextColor(hdc, state.theme.index);
+        let _ = TextOutW(hdc, x + 4, y_mid - asz.cy / 2, &aw);
     }
 }
 
