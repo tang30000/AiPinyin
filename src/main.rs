@@ -197,12 +197,15 @@ unsafe fn cb_process_key(vkey: u32) {
             }
             0x31..=0x39 => { // 数字键 → 选第N个联想词
                 let idx = (vkey - 0x31) as usize; // 0-based
+                eprintln!("[联想] 数字键 vkey={:#x} idx={} cands={:?}",
+                    vkey, idx, state.current_candidates);
                 if let Some(text) = state.current_candidates.get(idx).cloned() {
-                    state.history.push(&text);
-                    eprintln!("[联想] ↑ 上屏 {:?}", text);
-                    send_unicode_text(&text);
-                    // 继续联想下一词
-                    refresh_predictions(state);
+                    if text != "…" {
+                        state.history.push(&text);
+                        eprintln!("[联想] ↑ 上屏 {:?}", text);
+                        send_unicode_text(&text);
+                        refresh_predictions(state);
+                    }
                 }
                 return;
             }
@@ -348,7 +351,7 @@ unsafe extern "system" fn low_level_keyboard_hook(
             let should_eat = match vkey {
                 0x41..=0x5A => true,  // A-Z 永远拦截（中文模式）
                 0x08 => !state.input.engine.is_empty() || state.prediction_mode, // Backspace
-                0x20 => !state.input.engine.is_empty(), // Space（联想模式不拦截空格）
+                0x20 => has_input, // Space：有候选或联想时拦截
                 0x31..=0x39 => has_input, // 1-9：有候选或联想时拦截
                 0x1B => has_input, // Escape
                 0x0D => !state.input.engine.is_empty(), // Enter
