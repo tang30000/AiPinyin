@@ -217,11 +217,12 @@ pub fn open_settings() {
 
 fn open_settings_inner() -> Result<(), Box<dyn std::error::Error>> {
     use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tao::platform::windows::EventLoopBuilderExtWindows;
     use tao::window::WindowBuilder;
     use wry::WebViewBuilder;
 
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoopBuilder::new().with_any_thread(true).build();
     let window = WindowBuilder::new()
         .with_title("AiPinyin 设置")
         .with_inner_size(tao::dpi::LogicalSize::new(520.0, 680.0))
