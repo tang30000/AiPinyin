@@ -712,8 +712,12 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
                 None => continue,
             };
 
-            // 分数: 多字词大幅加分
-            let score = weight as i64 + (syl_count as i64) * 500;
+            // 分数: 多字词大幅加分, 单字无bonus (避免单字路径淹没词组)
+            let score = if syl_count >= 2 {
+                weight as i64 + (syl_count as i64) * 1000
+            } else {
+                weight as i64  // 单字只有权重, 无bonus
+            };
 
             for (rest_score, rest_path) in rest.iter().take(3) {
                 let total = score + rest_score;
