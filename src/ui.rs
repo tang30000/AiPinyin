@@ -520,13 +520,11 @@ unsafe extern "system" fn wnd_proc(
                     let state = &mut *state_ptr;
                     // 只有 generation 匹配才应用 (用户没有继续打字)
                     if state.ai_generation == gen {
-                        let count = std::cmp::min(9, merged.len());
-                        if count > 0 {
-                            state.current_candidates = merged[..count].to_vec();
-                            let refs: Vec<&str> = state.current_candidates.iter()
-                                .map(|s| s.as_str()).collect();
-                            state.cand_win.update_candidates(&raw, &refs);
-                            eprintln!("[AI] 异步更新候选: {:?}", &state.current_candidates[..std::cmp::min(3, count)]);
+                        if !merged.is_empty() {
+                            state.all_candidates = merged;
+                            state.page_offset = 0;
+                            crate::show_current_page(state, &raw);
+                            eprintln!("[AI] 异步更新候选: {} 条", state.all_candidates.len());
                         }
                     }
                 }

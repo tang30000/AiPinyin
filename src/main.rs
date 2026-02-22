@@ -42,8 +42,12 @@ struct ImeState {
     history: ai_engine::HistoryBuffer,
     cfg: config::Config,
     user_dict: user_dict::UserDict,
-    /// 候选窗口当前显示的候选词（经过插件+AI处理后）
+    /// 候选窗口当前显示的候选词（当前页）
     current_candidates: Vec<String>,
+    /// 所有候选词（用于翻页）
+    all_candidates: Vec<String>,
+    /// 当前页偏移（0, 9, 18, ...）
+    page_offset: usize,
     chinese_mode: bool,
     shift_down: bool,
     shift_modified: bool,
@@ -110,6 +114,8 @@ fn main() -> Result<()> {
         cfg,
         user_dict,
         current_candidates: Vec::new(),
+        all_candidates: Vec::new(),
+        page_offset: 0,
         chinese_mode: true,
         shift_down: false,
         shift_modified: false,
@@ -176,6 +182,19 @@ unsafe fn cb_plugin_toggle(name: &str, hwnd: HWND) -> plugin_system::ToggleResul
 unsafe fn cb_process_key(vkey: u32) {
     if GLOBAL_STATE.is_null() { return; }
     let state = &mut *GLOBAL_STATE;
+
+    // 翻页键: 直接处理, 不走 handle_key_down
+    match vkey {
+        0xBB | 0x22 => { // = 或 PgDn → 下一页
+            page_down(state);
+            return;
+        }
+        0xBD | 0x21 => { // - 或 PgUp → 上一页
+            page_up(state);
+            return;
+        }
+        _ => {}
+    }
 
     // 保存当前拼音（handle_key_down 可能会 clear）
     let raw_before = state.input.engine.raw_input().to_string();
@@ -283,6 +302,10 @@ unsafe extern "system" fn low_level_keyboard_hook(
                 0x31..=0x39 => !state.input.engine.is_empty(), // 1-9
                 0x1B => !state.input.engine.is_empty(), // Escape
                 0x0D => !state.input.engine.is_empty(), // Enter
+                0xBB => !state.input.engine.is_empty(), // = (下一页)
+                0xBD => !state.input.engine.is_empty(), // - (上一页)
+                0x21 => !state.input.engine.is_empty(), // PgUp
+                0x22 => !state.input.engine.is_empty(), // PgDn
                 _ => false,
             };
 
@@ -398,8 +421,50 @@ unsafe fn send_unicode_text(text: &str) -> u32 {
 
 
 // ============================================================
-// 候选词刷新 + 多策略光标定位
+// 翻页 + 候选词刷新
 // ============================================================
+
+const PAGE_SIZE: usize = 9;
+
+/// 显示当前页候选词
+pub(crate) unsafe fn show_current_page(state: &mut ImeState, raw: &str) {
+    let total = state.all_candidates.len();
+    if total == 0 { state.cand_win.hide(); return; }
+
+    let offset = state.page_offset.min(total.saturating_sub(1));
+    let end = std::cmp::min(offset + PAGE_SIZE, total);
+    state.current_candidates = state.all_candidates[offset..end].to_vec();
+
+    let page_num = offset / PAGE_SIZE + 1;
+    let total_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    let label = if total_pages > 1 {
+        format!("{} ({}/{})", raw, page_num, total_pages)
+    } else {
+        raw.to_string()
+    };
+
+    let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
+    state.cand_win.update_candidates(&label, &refs);
+}
+
+/// 下一页
+unsafe fn page_down(state: &mut ImeState) {
+    let total = state.all_candidates.len();
+    if state.page_offset + PAGE_SIZE < total {
+        state.page_offset += PAGE_SIZE;
+        let raw = state.input.engine.raw_input().to_string();
+        show_current_page(state, &raw);
+    }
+}
+
+/// 上一页
+unsafe fn page_up(state: &mut ImeState) {
+    if state.page_offset >= PAGE_SIZE {
+        state.page_offset -= PAGE_SIZE;
+        let raw = state.input.engine.raw_input().to_string();
+        show_current_page(state, &raw);
+    }
+}
 
 unsafe fn refresh_candidates(state: &mut ImeState) {
     if state.input.engine.is_empty() {
@@ -430,12 +495,12 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         }
     };
 
-    let count = std::cmp::min(9, display_cands.len());
-    if count == 0 { state.cand_win.hide(); return; }
+    if display_cands.is_empty() { state.cand_win.hide(); return; }
 
-    state.current_candidates = display_cands[..count].to_vec();
-    let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
-    state.cand_win.update_candidates(&raw, &refs);
+    // 保存所有候选, 显示当前页
+    state.all_candidates = display_cands;
+    state.page_offset = 0;
+    show_current_page(state, &raw);
 
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
@@ -487,7 +552,7 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     eprintln!("[IME] pinyin={:?}  cands={}  mode={}",
-        raw, count, if state.ai.ai_first { "AI异步" } else { "字典" });
+        raw, state.all_candidates.len(), if state.ai.ai_first { "AI异步" } else { "字典" });
 }
 
 /// 多策略获取光标屏幕坐标
