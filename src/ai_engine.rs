@@ -311,18 +311,18 @@ fn run_predict(
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
     if syllables.is_empty() {
         // 首字母模式: AI beam search + 声母约束
-        let initials: Vec<char> = pinyin.chars().collect();
-        let is_abbrev = initials.len() >= 2
-            && initials.iter().all(|c| "bpmfdtnlgkhjqxzcsryw".contains(*c));
+        let is_abbrev = pinyin.len() >= 2
+            && pinyin.chars().all(|c| "bpmfdtnlgkhjqxzcsryw".contains(c));
         
         if is_abbrev {
+            let initials = parse_initials(pinyin);
             let ctx_prefix = build_context(vocab, context);
             let vocab_size = 21128usize;
-            eprintln!("[AI] 首字母beam: initials={}, dict_words={}", pinyin, dict_words.len());
+            eprintln!("[AI] 首字母beam: initials={:?}, dict_words={}", initials, dict_words.len());
             
             // AI beam search: 逐字生成, 用声母约束
             let beam_results = abbreviation_beam_search(
-                session, vocab, &initials, &ctx_prefix, vocab_size, 3,
+                session, vocab, &initials, &ctx_prefix, vocab_size, 5,
             )?;
             
             // 合并: beam结果 + 字典缩写候选, 统一AI评分
@@ -649,13 +649,32 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
     Ok(session)
 }
 
-// ============================================================
-// 首字母 Beam Search — AI 驱动的缩写展开
-// ============================================================
+/// 解析首字母序列, 处理 zh/ch/sh 复合声母
+///
+/// "bzdzmb" → ['b','z','d','z','m','b']
+/// "zhdb" → ["zh", "d", "b"]  (zh 是复合声母)
+fn parse_initials(input: &str) -> Vec<String> {
+    let bytes = input.as_bytes();
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        // 尝试复合声母 zh, ch, sh
+        if i + 1 < bytes.len() && bytes[i + 1] == b'h'
+            && (ch == 'z' || ch == 'c' || ch == 's') {
+            result.push(format!("{}h", ch));
+            i += 2;
+        } else {
+            result.push(ch.to_string());
+            i += 1;
+        }
+    }
+    result
+}
 
 /// 首字母 beam search: 逐字生成, 用声母约束
 ///
-/// 例: initials = ['b','z','d'], 上文 = "这个我"
+/// 例: initials = ["b","z","d"], 上文 = "这个我"
 ///   Step 1: AI预测 → 约束声母=b → 不(最高), 把, 别
 ///   Step 2: AI预测(不) → 约束声母=z → 知(最高), 在, ...
 ///   Step 3: AI预测(不知) → 约束声母=d → 道(最高), 到, ...
@@ -663,7 +682,7 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
 fn abbreviation_beam_search(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
-    initials: &[char],
+    initials: &[String],
     ctx_prefix: &[i64],
     vocab_size: usize,
     beam_width: usize,
@@ -678,11 +697,19 @@ fn abbreviation_beam_search(
         (String::new(), ctx_prefix.to_vec(), 0.0)
     ];
 
-    for &initial in initials {
-        let candidate_ids = match vocab.initial_chars.get(&initial) {
-            Some(ids) => ids,
-            None => return Ok(vec![]),  // 无效声母
-        };
+    for initial_str in initials {
+        // 收集该声母(可能是复合声母)对应的所有字ID
+        let mut candidate_ids: Vec<i64> = Vec::new();
+        for (py, ids) in &vocab.pinyin2char_ids {
+            if py.starts_with(initial_str.as_str()) {
+                for &id in ids {
+                    if !candidate_ids.contains(&id) {
+                        candidate_ids.push(id);
+                    }
+                }
+            }
+        }
+        if candidate_ids.is_empty() { continue; }
 
         let mut new_beams: Vec<(String, Vec<i64>, f32)> = Vec::new();
 
