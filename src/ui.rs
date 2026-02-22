@@ -507,6 +507,8 @@ unsafe extern "system" fn wnd_proc(
                 let pt = POINT { x, y };
                 if PtInRect(&state.settings_btn_rect, pt).as_bool() {
                     crate::settings::open_settings();
+                } else if PtInRect(&state.js_btn_rect, pt).as_bool() {
+                    show_plugin_menu(hwnd);
                 }
             }
             LRESULT(0)
