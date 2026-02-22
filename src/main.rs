@@ -470,26 +470,40 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     let raw = state.input.engine.raw_input().to_string();
+    let syllables = state.input.engine.syllables().to_vec();
 
-    // Phase 1: 立即显示字典候选 (同步, <1ms)
+    // Phase 1: 立即显示候选 (同步, <5ms)
     let dict_cands = state.input.engine.get_candidates();
     let dict_after = state.plugins.transform_candidates(&raw, dict_cands);
 
-    // 用户自学习提权
+    // 改动4: 单音节时同步运行一次 AI 推理（单次推理 <2ms, 用户无感知延迟）
+    // 让用户第一时间看到 AI 排序的结果，而不是等待异步更新
+    let sync_ai_cands: Vec<String> = if syllables.len() == 1 && state.ai.is_available() {
+        state.ai.predict(&raw, &state.history, 9, &dict_after)
+    } else {
+        vec![]
+    };
+
+    // 用户自学习提权 + 合并
+    // 改动1: 顺序 = 用户词 → AI词 → 字典词（字典只补充不重复的）
     let display_cands = {
         let learned = state.user_dict.get_learned_words(&raw);
-        if learned.is_empty() {
-            dict_after.clone()
-        } else {
-            let mut boosted: Vec<String> = Vec::new();
-            for (word, _count) in &learned {
-                if !boosted.contains(word) { boosted.push(word.clone()); }
-            }
-            for word in &dict_after {
-                if !boosted.contains(word) { boosted.push(word.clone()); }
-            }
-            boosted
+        let mut merged: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // 0. 用户学习词（最高优先级）
+        for (word, _) in &learned {
+            if seen.insert(word.clone()) { merged.push(word.clone()); }
         }
+        // 1. AI 同步推理结果（单音节时）
+        for w in &sync_ai_cands {
+            if seen.insert(w.clone()) { merged.push(w.clone()); }
+        }
+        // 2. 字典候选（补充剩余位置）
+        for word in &dict_after {
+            if seen.insert(word.clone()) { merged.push(word.clone()); }
+        }
+        merged
     };
 
     if display_cands.is_empty() { state.cand_win.hide(); return; }
@@ -502,15 +516,14 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     let pt = get_caret_screen_pos();
     state.cand_win.show(pt.x, pt.y + 4);
 
-    // Phase 2: AI 推理在后台线程 (异步, 不阻塞 UI)
+    // Phase 2: AI 推理在后台线程 (异步, 用于多音节/长句上下文感知更新)
+    // 单音节已在 Phase 1 同步处理，这里重点处理多音节和上下文感知重排
     if state.ai.ai_first && state.ai.is_available() {
         let raw_clone = raw.clone();
         let dict_clone = dict_after;
-        let hwnd_raw = state.cand_win.hwnd().0 as isize;  // HWND is !Send, pass as raw
-        let ctx_str = state.history.context_string();
-        let ai_top_k = std::cmp::min(state.cfg.ai.top_k, 5);
+        let hwnd_raw = state.cand_win.hwnd().0 as isize;
+        let ai_top_k = std::cmp::min(state.cfg.ai.top_k, 9);
 
-        // 递增 generation, 后续结果只在 generation 匹配时才应用
         state.ai_generation += 1;
         let gen = state.ai_generation;
 
@@ -523,25 +536,26 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
                 &raw_clone, &state.history, ai_top_k, &dict_clone,
             );
 
-            // 如果 generation 已变, 丢弃过期结果
             if state.ai_generation != gen { return; }
 
-            // 合并 AI + 字典
+            // 改动1: 合并顺序 = 用户词 → AI词 → 字典词
             let mut merged = Vec::new();
             let mut seen = std::collections::HashSet::new();
+
+            // 用户学习词
             let learned = state.user_dict.get_learned_words(&raw_clone);
             for (word, _) in &learned {
                 if seen.insert(word.clone()) { merged.push(word.clone()); }
             }
+            // AI 词（排在字典前面）
             for w in &ai_scored {
                 if seen.insert(w.clone()) { merged.push(w.clone()); }
             }
+            // 字典词补充（不限数量，供翻页使用）
             for w in &dict_clone {
                 if seen.insert(w.clone()) { merged.push(w.clone()); }
-                if merged.len() >= 15 { break; }
             }
 
-            // 存结果, PostMessage 通知主线程 (UI 操作只能在主线程)
             AI_RESULT = Some((gen, raw_clone, merged));
             let hwnd = HWND(hwnd_raw as *mut _);
             let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
@@ -549,8 +563,9 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     }
 
     eprintln!("[IME] pinyin={:?}  cands={}  mode={}",
-        raw, state.all_candidates.len(), if state.ai.ai_first { "AI异步" } else { "字典" });
+        raw, state.all_candidates.len(), if state.ai.ai_first { "AI" } else { "字典" });
 }
+
 
 /// 多策略获取光标屏幕坐标
 ///

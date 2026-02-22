@@ -459,48 +459,66 @@ fn run_predict(
     Ok(vec![])
 }
 
-/// 贪心生成 (GPT2-Chinese: 纯字符自回归)
+/// 真正的 Beam Search (GPT2-Chinese: 纯字符自回归)
+///
+/// 每步维护 beam_width 条路径，每条路径记录 (text, ids, cumulative_score)。
+/// 每步对每条 beam 用拼音约束取 top-k，扩展后保留全局最优 beam_width 条。
 fn run_predict_greedy(
     session: &mut ort::session::Session,
     vocab: &VocabIndex,
     syllables: &[String],
     ctx_prefix: &[i64],
     vocab_size: usize,
-    top_k: usize,
+    beam_width: usize,
 ) -> Result<Vec<String>, String> {
-    let py1 = &syllables[0];
-    let logits = run_inference(session, ctx_prefix)?;
-    let offset = (ctx_prefix.len() - 1) * vocab_size;
-    if offset + vocab_size > logits.len() { return Err("logits too short".into()); }
-    let first_chars = get_top_k_constrained(&logits[offset..offset + vocab_size], vocab, py1, top_k);
-    if first_chars.is_empty() { return Ok(vec![]); }
+    if syllables.is_empty() { return Ok(vec![]); }
 
-    let mut results = Vec::new();
-    for (first_id, first_ch) in &first_chars {
-        let mut phrase = first_ch.clone();
-        let mut current_ids = ctx_prefix.to_vec();
-        current_ids.push(*first_id);
+    // beams: Vec<(text, ids, cumulative_score)>
+    let mut beams: Vec<(String, Vec<i64>, f32)> = vec![
+        (String::new(), ctx_prefix.to_vec(), 0.0)
+    ];
 
-        for syl in syllables.iter().skip(1) {
-            let logits = run_inference(session, &current_ids)?;
-            let lp = (current_ids.len() - 1) * vocab_size;
-            if lp + vocab_size > logits.len() { break; }
+    for syl in syllables {
+        let mut next_beams: Vec<(String, Vec<i64>, f32)> = Vec::new();
 
-            let top1 = get_top_k_constrained(&logits[lp..lp + vocab_size], vocab, syl, 1);
-            if let Some((char_id, ch)) = top1.into_iter().next() {
-                phrase.push_str(&ch);
-                current_ids.push(char_id);
-            } else {
-                break;
+        for (text, ids, score) in &beams {
+            let logits = run_inference(session, ids)?;
+            let offset = (ids.len() - 1) * vocab_size;
+            if offset + vocab_size > logits.len() { continue; }
+
+            // 对当前 beam 用拼音约束取 top-k 个字
+            let top_chars = get_top_k_constrained(
+                &logits[offset..offset + vocab_size], vocab, syl, beam_width,
+            );
+
+            for (char_id, ch) in top_chars {
+                // 从 logits 中取该字的原始分数累加
+                let char_score = logits.get(offset + char_id as usize).copied().unwrap_or(-50.0);
+                let mut new_ids = ids.clone();
+                new_ids.push(char_id);
+                let mut new_text = text.clone();
+                new_text.push_str(&ch);
+                next_beams.push((new_text, new_ids, score + char_score));
             }
         }
-        results.push(phrase);
+
+        if next_beams.is_empty() { break; }
+
+        // 保留全局最优 beam_width 条（按累计分数降序）
+        next_beams.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        next_beams.truncate(beam_width);
+        beams = next_beams;
     }
 
+    // 提取结果，去重
     let mut seen = std::collections::HashSet::new();
-    results.retain(|s| seen.insert(s.clone()));
+    let results: Vec<String> = beams.into_iter()
+        .map(|(text, _, _)| text)
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect();
     Ok(results)
 }
+
 
 /// 拼音约束的 top-K 选取
 fn get_top_k_constrained(
@@ -578,15 +596,16 @@ fn run_rerank(
     }).collect();
 
     // === 动态 AI 权重 ===
+    // GPT-2 即使无上下文也有语言模型先验，应给予足够权重
     // 上下文越长 → AI 越可信 → AI 权重越高
     let ai_weight = if ctx_len == 0 {
-        15.0   // 无上下文: AI 基本不干预
+        50.0   // 无上下文: AI 先验概率仍然有效
     } else if ctx_len <= 2 {
-        35.0   // 短上下文: AI 适度参与
+        60.0   // 短上下文: AI 适度主导
     } else if ctx_len <= 4 {
-        55.0   // 中上下文: AI 与字典各半
+        70.0   // 中上下文: AI 主导
     } else {
-        70.0   // 长上下文: AI 主导
+        80.0   // 长上下文: AI 强主导
     };
     let dict_weight = 100.0 - ai_weight;
 
