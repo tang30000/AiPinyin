@@ -39,7 +39,7 @@ for dict_path in DICT_PATHS:
                 word = parts[1].strip()
                 try: w = int(parts[2].strip())
                 except: continue
-                if len(word) == 1 and w >= 400:
+                if len(word) == 1 and w >= 200:
                     COMMON_CHARS.add(word)
     break  # 只读第一个
 
