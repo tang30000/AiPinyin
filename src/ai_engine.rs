@@ -250,55 +250,6 @@ impl AIPredictor {
         }
     }
 
-    /// 联想续写：把上下文喂给模型，AI 自回归生成接下来的字序列
-    ///
-    /// 两轮推理（纯 AI，不使用拼音字典）:
-    ///   第1轮: 从历史上下文预测第1个字，取 top-beam 个
-    ///   第2轮: 各延伸1个字，得到 top_k 个2字组合
-    pub fn generate_continuations(
-        &mut self, context: &HistoryBuffer, top_k: usize,
-    ) -> Vec<String> {
-        // 手动拆开 self 以满足借用检查器（session 可变，vocab 不变）
-        let (session, vocab) = match (&mut self.state, &self.vocab) {
-            (AIState::Ready(s), Some(v)) => (s, v),
-            _ => return vec![],
-        };
-
-        let ctx_str = context.context_string();
-        let base_ids: Vec<i64> = {
-            let mut ids = vec![vocab.cls_id];
-            ids.extend(ctx_str.chars()
-                .filter_map(|c| vocab.char2id.get(&c.to_string()).copied()));
-            ids.push(vocab.sep_id);
-            ids
-        };
-
-        // 第1轮：预测第1个字
-        let beam = (top_k + 2).min(12);
-        let first_chars = top_chars(session, vocab, &base_ids, beam);
-        if first_chars.is_empty() { return vec![]; }
-
-        // 第2轮：各字延伸1字，得到2字组合
-        let mut result: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (ch1, _) in &first_chars {
-            let ch1_id = match vocab.char2id.get(ch1) {
-                Some(&id) => id, None => continue,
-            };
-            let mut ext_ids = base_ids.clone();
-            ext_ids.push(ch1_id);
-
-            for (ch2, _) in top_chars(session, vocab, &ext_ids, 3) {
-                let word = format!("{}{}", ch1, ch2);
-                if seen.insert(word.clone()) { result.push(word); }
-                if result.len() >= top_k { return result; }
-            }
-            if seen.insert(ch1.clone()) { result.push(ch1.clone()); }
-            if result.len() >= top_k { return result; }
-        }
-        result
-    }
-
     /// 字典辅助: 上下文感知重排
     pub fn rerank(
         &mut self, pinyin: &str, candidates: Vec<String>, context: &HistoryBuffer,
@@ -320,44 +271,6 @@ impl AIPredictor {
 // ============================================================
 // ONNX 推理
 // ============================================================
-
-/// 从 token 序列推理，返回最高概率的 top_n 个中文单字（含得分）
-fn top_chars(
-    session: &mut ort::session::Session,
-    vocab: &VocabIndex,
-    ids: &[i64],
-    top_n: usize,
-) -> Vec<(String, f32)> {
-    let logits = match run_inference(session, ids) {
-        Ok(l) => l, Err(_) => return vec![],
-    };
-    let seq_len = ids.len();
-    if logits.is_empty() || logits.len() % seq_len != 0 { return vec![]; }
-    let vocab_size = logits.len() / seq_len;
-    let offset = (seq_len - 1) * vocab_size;
-
-    let mut scored: Vec<(i64, f32)> = logits[offset..offset + vocab_size]
-        .iter().enumerate()
-        .filter(|(i, _)| *i >= 4)
-        .map(|(i, &s)| (i as i64, s))
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut result = Vec::new();
-    for (id, score) in &scored {
-        if result.len() >= top_n { break; }
-        let ch = match vocab.id2char.get(id) { Some(c) => c, None => continue };
-        if ch.contains('<') || ch.contains('>') || ch.contains('[') || ch.starts_with("##") {
-            continue;
-        }
-        let chars: Vec<char> = ch.chars().collect();
-        if chars.len() != 1 || !('\u{4E00}'..='\u{9FFF}').contains(&chars[0]) {
-            continue;
-        }
-        result.push((ch.clone(), *score));
-    }
-    result
-}
 
 /// 运行推理: input_ids → logits
 fn run_inference(

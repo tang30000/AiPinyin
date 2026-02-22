@@ -190,40 +190,6 @@ unsafe fn cb_process_key(vkey: u32) {
         _ => {}
     }
 
-    // 联想态 = 引擎无输入 + 封候选居存在（上屏后 AI 预测的下一词）
-    if state.input.engine.is_empty() && !state.all_candidates.is_empty() {
-        match vkey {
-            0x31..=0x39 => {
-                let idx = (vkey - 0x31) as usize;
-                if let Some(text) = state.current_candidates.get(idx).cloned() {
-                    state.history.push(&text);
-                    send_unicode_text(&text);
-                    trigger_next_prediction(state);
-                }
-                return;
-            }
-            0x20 => {
-                if let Some(text) = state.current_candidates.first().cloned() {
-                    state.history.push(&text);
-                    send_unicode_text(&text);
-                    trigger_next_prediction(state);
-                }
-                return;
-            }
-            0x1B | 0x08 => {
-                state.all_candidates.clear();
-                state.current_candidates.clear();
-                state.cand_win.hide();
-                return;
-            }
-            _ => {
-                // 字母等其他键：清空联想候选，继续正常输入流程
-                state.all_candidates.clear();
-                state.current_candidates.clear();
-            }
-        }
-    }
-
     let raw_before = state.input.engine.raw_input().to_string();
     let result = handle_key_down(&mut state.input, vkey);
 
@@ -248,7 +214,9 @@ unsafe fn cb_process_key(vkey: u32) {
                 state.current_candidates.clear();
 
                 if state.input.engine.is_empty() {
-                    trigger_next_prediction(state);
+                    state.all_candidates.clear();
+                    state.current_candidates.clear();
+                    state.cand_win.hide();
                 } else {
                     refresh_candidates(state);
                 }
@@ -310,15 +278,15 @@ unsafe extern "system" fn low_level_keyboard_hook(
             }
 
             // 中文模式：先判断是否要拦截，立即返回，再异步处理
-            let has_cands = !state.all_candidates.is_empty();
+            let has_input = !state.input.engine.is_empty();
             let should_eat = match vkey {
                 0x41..=0x5A => true,
-                0x08 => !state.input.engine.is_empty() || has_cands,
-                0x20 => !state.input.engine.is_empty() || has_cands,
-                0x31..=0x39 => has_cands,
-                0x1B => has_cands,
-                0x0D => !state.input.engine.is_empty(),
-                0xBB | 0xBD | 0x21 | 0x22 => has_cands,
+                0x08 => has_input,
+                0x20 => has_input,
+                0x31..=0x39 => has_input,
+                0x1B => has_input,
+                0x0D => has_input,
+                0xBB | 0xBD | 0x21 | 0x22 => has_input,
                 _ => false,
             };
 
@@ -578,44 +546,6 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         raw, state.all_candidates.len(), if state.ai.ai_first { "AI" } else { "字典" });
 }
 
-
-/// 上屏后异步预测下一词，结果回来直接走 WM_AI_RESULT 更新候选窗
-unsafe fn trigger_next_prediction(state: &mut ImeState) {
-    if !state.cfg.ai.predict_next {
-        state.all_candidates.clear();
-        state.current_candidates.clear();
-        state.cand_win.hide();
-        return;
-    }
-    if !state.ai.is_available() { state.cand_win.hide(); return; }
-    let hwnd_raw = state.cand_win.hwnd().0 as isize;
-    state.ai_generation += 1;
-    let gen = state.ai_generation;
-    let last_word = state.history.recent(1).first().map(|s| s.to_string()).unwrap_or_default();
-    // 不清空、不 hide：让旧候选保持可见直到 AI 结果到来
-    state.page_offset = 0;
-
-    std::thread::spawn(move || {
-        let state_ptr = GLOBAL_STATE;
-        if state_ptr.is_null() { return; }
-        let state = &mut *state_ptr;
-        if state.ai_generation != gen { return; }
-
-        let mut preds = state.ai.generate_continuations(&state.history, 12);
-        if state.ai_generation != gen { return; }
-
-        // 去掉与刚上屏词完全相同的候选，避免立即循环重复
-        if !last_word.is_empty() {
-            preds.retain(|w| w != &last_word);
-        }
-        preds.truncate(9);
-        if preds.is_empty() { return; }
-
-        AI_RESULT = Some((gen, String::new(), preds));
-        let hwnd = HWND(hwnd_raw as *mut _);
-        let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
-    });
-}
 
 
 /// 多策略获取光标屏幕坐标
