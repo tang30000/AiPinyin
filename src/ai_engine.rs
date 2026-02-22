@@ -59,6 +59,9 @@ pub struct VocabIndex {
     pub pinyin2char_ids: HashMap<String, Vec<i64>>,
     /// 汉字 → 拼音 (反向映射, 用于构建 Concat 上下文)
     pub char2pinyin: HashMap<String, String>,
+    /// 声母 → 候选汉字 token IDs (首字母模式用)
+    /// 'b' → [不的id, 把的id, 被的id, ...]
+    pub initial_chars: HashMap<char, Vec<i64>>,
     /// 特殊 token IDs
     pub cls_id: i64,  // [CLS] = 101
     pub sep_id: i64,  // [SEP] = 102
@@ -123,11 +126,25 @@ impl VocabIndex {
         let sep_id = *char2id.get("<eos>").unwrap_or(&102);
         let pad_id = *char2id.get("<pad>").unwrap_or(&0);
 
-        eprintln!("[AI] vocab: {} pinyin, {} chars, {} pinyin2char, {} char2pinyin",
-            pinyin2id.len(), char2id.len(), pinyin2char_ids.len(), char2pinyin.len());
+        // 构建声母→字ID映射 (首字母模式用)
+        let mut initial_chars: HashMap<char, Vec<i64>> = HashMap::new();
+        for (py, ids) in &pinyin2char_ids {
+            if let Some(first_ch) = py.chars().next() {
+                let entry = initial_chars.entry(first_ch).or_default();
+                for &id in ids {
+                    if !entry.contains(&id) {
+                        entry.push(id);
+                    }
+                }
+            }
+        }
+        let initial_count: usize = initial_chars.values().map(|v| v.len()).sum();
+        eprintln!("[AI] vocab: {} pinyin, {} chars, {} pinyin2char, {} char2pinyin, {} 声母映射({}字)",
+            pinyin2id.len(), char2id.len(), pinyin2char_ids.len(), char2pinyin.len(),
+            initial_chars.len(), initial_count);
         Some(VocabIndex {
             pinyin2id, char2id, id2char, pinyin2char, pinyin2char_ids, char2pinyin,
-            cls_id, sep_id, pad_id, unk_id,
+            initial_chars, cls_id, sep_id, pad_id, unk_id,
         })
     }
 }
@@ -292,7 +309,59 @@ fn run_predict(
     dict_words: &[String],
 ) -> Result<Vec<String>, String> {
     let syllables = crate::pinyin::split_pinyin_pub(pinyin);
-    if syllables.is_empty() { return Ok(vec![]); }
+    if syllables.is_empty() {
+        // 首字母模式: AI beam search + 声母约束
+        let initials: Vec<char> = pinyin.chars().collect();
+        let is_abbrev = initials.len() >= 2
+            && initials.iter().all(|c| "bpmfdtnlgkhjqxzcsryw".contains(*c));
+        
+        if is_abbrev {
+            let ctx_prefix = build_context(vocab, context);
+            let vocab_size = 21128usize;
+            eprintln!("[AI] 首字母beam: initials={}, dict_words={}", pinyin, dict_words.len());
+            
+            // AI beam search: 逐字生成, 用声母约束
+            let beam_results = abbreviation_beam_search(
+                session, vocab, &initials, &ctx_prefix, vocab_size, 3,
+            )?;
+            
+            // 合并: beam结果 + 字典缩写候选, 统一AI评分
+            let mut all_cands: Vec<String> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for c in &beam_results {
+                if seen.insert(c.clone()) { all_cands.push(c.clone()); }
+            }
+            for w in dict_words.iter().take(10) {
+                if seen.insert(w.clone()) { all_cands.push(w.clone()); }
+            }
+            
+            // 对所有候选统一打分 (前3字)
+            let mut scored: Vec<(String, f32)> = Vec::new();
+            for word in &all_cands {
+                let chars: Vec<char> = word.chars().collect();
+                let score_len = std::cmp::min(3, chars.len());
+                let mut ids = ctx_prefix.clone();
+                let mut total = 0.0f32;
+                let mut valid = true;
+                for ch in &chars[..score_len] {
+                    let ch_str = ch.to_string();
+                    let ch_id = match vocab.char2id.get(&ch_str) {
+                        Some(&id) => id,
+                        None => { valid = false; break; }
+                    };
+                    let logits = run_inference(session, &ids)?;
+                    let offset = (ids.len() - 1) * vocab_size;
+                    if offset + ch_id as usize >= logits.len() { valid = false; break; }
+                    total += logits[offset + ch_id as usize];
+                    ids.push(ch_id);
+                }
+                if valid { scored.push((word.clone(), total)); }
+            }
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            return Ok(scored.into_iter().take(top_k).map(|(w, _)| w).collect());
+        }
+        return Ok(vec![]);
+    }
 
     let vocab_size = 21128usize;
     let ctx_prefix = build_context(vocab, context);
@@ -578,6 +647,79 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
         .map_err(|e| format!("load: {}", e))?;
     eprintln!("[AI] loaded in {:?}", start.elapsed());
     Ok(session)
+}
+
+// ============================================================
+// 首字母 Beam Search — AI 驱动的缩写展开
+// ============================================================
+
+/// 首字母 beam search: 逐字生成, 用声母约束
+///
+/// 例: initials = ['b','z','d'], 上文 = "这个我"
+///   Step 1: AI预测 → 约束声母=b → 不(最高), 把, 别
+///   Step 2: AI预测(不) → 约束声母=z → 知(最高), 在, ...
+///   Step 3: AI预测(不知) → 约束声母=d → 道(最高), 到, ...
+///   → "不知道"
+fn abbreviation_beam_search(
+    session: &mut ort::session::Session,
+    vocab: &VocabIndex,
+    initials: &[char],
+    ctx_prefix: &[i64],
+    vocab_size: usize,
+    beam_width: usize,
+) -> Result<Vec<String>, String> {
+    if initials.is_empty() { return Ok(vec![]); }
+    // 限制长度 (性能)
+    let max_len = std::cmp::min(initials.len(), 8);
+    let initials = &initials[..max_len];
+
+    // beams: Vec<(text, ids, cumulative_score)>
+    let mut beams: Vec<(String, Vec<i64>, f32)> = vec![
+        (String::new(), ctx_prefix.to_vec(), 0.0)
+    ];
+
+    for &initial in initials {
+        let candidate_ids = match vocab.initial_chars.get(&initial) {
+            Some(ids) => ids,
+            None => return Ok(vec![]),  // 无效声母
+        };
+
+        let mut new_beams: Vec<(String, Vec<i64>, f32)> = Vec::new();
+
+        for (text, ids, score) in &beams {
+            let logits = run_inference(session, ids)?;
+            let offset = (ids.len() - 1) * vocab_size;
+            if offset + vocab_size > logits.len() { continue; }
+
+            // 在该声母对应的字中取 top-beam_width
+            let mut char_scores: Vec<(i64, f32)> = candidate_ids.iter()
+                .filter_map(|&cid| {
+                    let idx = offset + cid as usize;
+                    if idx < logits.len() { Some((cid, logits[idx])) } else { None }
+                })
+                .collect();
+            char_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            for &(char_id, char_score) in char_scores.iter().take(beam_width) {
+                if let Some(ch_str) = vocab.id2char.get(&char_id) {
+                    let mut new_text = text.clone();
+                    new_text.push_str(ch_str);
+                    let mut new_ids = ids.clone();
+                    new_ids.push(char_id);
+                    new_beams.push((new_text, new_ids, score + char_score));
+                }
+            }
+        }
+
+        // 保留 top beam_width 条路径
+        new_beams.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        new_beams.truncate(beam_width);
+        beams = new_beams;
+
+        if beams.is_empty() { break; }
+    }
+
+    Ok(beams.into_iter().map(|(text, _, _)| text).collect())
 }
 
 // ============================================================

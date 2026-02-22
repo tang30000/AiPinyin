@@ -688,7 +688,7 @@ impl PinyinEngine {
         }
 
         // 3. 首字母缩写: "wm" -> 我们, "sj" -> 时间
-        if self.raw.len() >= 2 && self.raw.len() <= 6 {
+        if self.raw.len() >= 2 && self.raw.len() <= 10 {
             let ab = dict.lookup_abbreviation(&self.raw);
             add!(ab, 15);
         }
