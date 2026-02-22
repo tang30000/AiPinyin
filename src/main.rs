@@ -56,10 +56,7 @@ struct ImeState {
     ai_generation: u64,
     /// 上次上屏的 (拼音, 汉字), 用于检测退格撤销
     last_commit: Option<(String, String)>,
-    /// 退格计数: 用户连续按了多少次退格
     backspace_count: usize,
-    /// 联想模式: 上屏后显示下一词预测（无拼音输入）
-    prediction_mode: bool,
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -125,7 +122,6 @@ fn main() -> Result<()> {
         ai_generation: 0,
         last_commit: None,
         backspace_count: 0,
-        prediction_mode: false,
     });
 
     unsafe {
@@ -187,118 +183,85 @@ unsafe fn cb_process_key(vkey: u32) {
     if GLOBAL_STATE.is_null() { return; }
     let state = &mut *GLOBAL_STATE;
 
-    // 联想模式特殊处理
-    if state.prediction_mode {
-        match vkey {
-            0x1B | 0x08 => { // ESC/退格 → 退出联想
-                state.prediction_mode = false;
-                state.cand_win.hide();
-                return;
-            }
-            0x31..=0x39 => { // 数字键 → 选第N个联想词
-                let idx = (vkey - 0x31) as usize; // 0-based
-                eprintln!("[联想] 数字键 vkey={:#x} idx={} cands={:?}",
-                    vkey, idx, state.current_candidates);
-                if let Some(text) = state.current_candidates.get(idx).cloned() {
-                    if text != "…" {
-                        state.history.push(&text);
-                        eprintln!("[联想] ↑ 上屏 {:?}", text);
-                        send_unicode_text(&text);
-                        refresh_predictions(state);
-                    }
-                }
-                return;
-            }
-            0x20 => { // 空格 → 选第一个联想词
-                if let Some(text) = state.current_candidates.first().cloned() {
-                    if text != "…" { // 还在加载中时忽略
-                        state.history.push(&text);
-                        eprintln!("[联想] ↑ 空格选 {:?}", text);
-                        send_unicode_text(&text);
-                        refresh_predictions(state);
-                    }
-                }
-                return;
-            }
-            0x41..=0x5A => { // A-Z → 退出联想，正常处理
-                state.prediction_mode = false;
-            }
-            _ => { // 其他键 → 退出联想
-                state.prediction_mode = false;
-                state.cand_win.hide();
-                return;
-            }
-        }
-    }
-
-    // 翻页键: 直接处理, 不走 handle_key_down
+    // 翻页键直接处理
     match vkey {
-        0xBB | 0x22 => { // = 或 PgDn → 下一页
-            page_down(state);
-            return;
-        }
-        0xBD | 0x21 => { // - 或 PgUp → 上一页
-            page_up(state);
-            return;
-        }
+        0xBB | 0x22 => { page_down(state); return; }
+        0xBD | 0x21 => { page_up(state); return; }
         _ => {}
     }
 
-    // 保存当前拼音（handle_key_down 可能会 clear）
-    let raw_before = state.input.engine.raw_input().to_string();
+    // 联想态 = 引擎无输入 + 封候选居存在（上屏后 AI 预测的下一词）
+    if state.input.engine.is_empty() && !state.all_candidates.is_empty() {
+        match vkey {
+            0x31..=0x39 => {
+                let idx = (vkey - 0x31) as usize;
+                if let Some(text) = state.current_candidates.get(idx).cloned() {
+                    state.history.push(&text);
+                    send_unicode_text(&text);
+                    trigger_next_prediction(state);
+                }
+                return;
+            }
+            0x20 => {
+                if let Some(text) = state.current_candidates.first().cloned() {
+                    state.history.push(&text);
+                    send_unicode_text(&text);
+                    trigger_next_prediction(state);
+                }
+                return;
+            }
+            0x1B | 0x08 => {
+                state.all_candidates.clear();
+                state.current_candidates.clear();
+                state.cand_win.hide();
+                return;
+            }
+            _ => {
+                // 字母等其他键：清空联想候选，继续正常输入流程
+                state.all_candidates.clear();
+                state.current_candidates.clear();
+            }
+        }
+    }
 
-    // 调用原有的按键处理逻辑
+    let raw_before = state.input.engine.raw_input().to_string();
     let result = handle_key_down(&mut state.input, vkey);
 
     match result.commit {
         Some(CommitAction::Index(idx)) => {
-            let text = state.current_candidates.get(idx).cloned()
-                .unwrap_or_default();
+            let text = state.current_candidates.get(idx).cloned().unwrap_or_default();
             if !text.is_empty() {
-                state.history.push(&text);  // 记录上屏历史
-                // 自学习：记录 (拼音 → 选词)
-                if !raw_before.is_empty() && !state.prediction_mode {
+                state.history.push(&text);
+                if !raw_before.is_empty() {
                     state.user_dict.learn(&raw_before, &text);
                     if text.chars().count() >= 3 {
                         crate::pinyin::cache_ai_word(&raw_before, &text);
                     }
                 }
-                // 记录上次上屏, 用于退格撤销
-                if !state.prediction_mode {
-                    state.last_commit = Some((raw_before.clone(), text.clone()));
-                    state.backspace_count = 0;
-                }
-                eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
-                    send_unicode_text(&text));
+                state.last_commit = Some((raw_before.clone(), text.clone()));
+                state.backspace_count = 0;
+                eprintln!("[IME] ↑ {:?}", text);
+                send_unicode_text(&text);
 
-                // 部分消耗: 根据选中词的字数消耗对应音节
                 let char_count = text.chars().count();
                 state.input.engine.consume_syllables(char_count);
                 state.current_candidates.clear();
 
                 if state.input.engine.is_empty() {
-                    // 拼音消耗完毛 → 进入联想模式（预测下一词）
-                    state.prediction_mode = true;
-                    refresh_predictions(state);
-                    return;
+                    trigger_next_prediction(state);
                 } else {
-                    // 还有剩余音节 → 立即刷新候选
-                    state.prediction_mode = false;
-                    eprintln!("[IME] 剩余: {:?} → {:?}",
-                        state.input.engine.raw_input(),
-                        state.input.engine.syllables());
                     refresh_candidates(state);
-                    return;
                 }
+                return;
             }
         }
         Some(CommitAction::Text(text)) => {
             state.cand_win.hide();
             state.input.engine.clear();
             state.current_candidates.clear();
-            state.history.push(&text);  // 记录上屏历史
-            eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
-                send_unicode_text(&text));
+            state.history.push(&text);
+            eprintln!("[IME] ↑ {:?}", text);
+            send_unicode_text(&text);
         }
         None => {}
     }
@@ -347,18 +310,15 @@ unsafe extern "system" fn low_level_keyboard_hook(
             }
 
             // 中文模式：先判断是否要拦截，立即返回，再异步处理
-            let has_input = !state.input.engine.is_empty() || state.prediction_mode;
+            let has_cands = !state.all_candidates.is_empty();
             let should_eat = match vkey {
-                0x41..=0x5A => true,  // A-Z 永远拦截（中文模式）
-                0x08 => !state.input.engine.is_empty() || state.prediction_mode, // Backspace
-                0x20 => has_input, // Space：有候选或联想时拦截
-                0x31..=0x39 => has_input, // 1-9：有候选或联想时拦截
-                0x1B => has_input, // Escape
-                0x0D => !state.input.engine.is_empty(), // Enter
-                0xBB => has_input, // = (下一页)
-                0xBD => has_input, // - (上一页)
-                0x21 => has_input, // PgUp
-                0x22 => has_input, // PgDn
+                0x41..=0x5A => true,
+                0x08 => !state.input.engine.is_empty() || has_cands,
+                0x20 => !state.input.engine.is_empty() || has_cands,
+                0x31..=0x39 => has_cands,
+                0x1B => has_cands,
+                0x0D => !state.input.engine.is_empty(),
+                0xBB | 0xBD | 0x21 | 0x22 => has_cands,
                 _ => false,
             };
 
@@ -619,18 +579,12 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 }
 
 
-/// 联想模式：上屏后预测下一词（无拼音约束，纯 AI 上下文预测）
-unsafe fn refresh_predictions(state: &mut ImeState) {
-    if !state.ai.is_available() {
-        state.cand_win.hide();
-        state.prediction_mode = false;
-        return;
-    }
+/// 上屏后异步预测下一词，结果回来直接走 WM_AI_RESULT 更新候选窗
+unsafe fn trigger_next_prediction(state: &mut ImeState) {
+    if !state.ai.is_available() { return; }
     let hwnd_raw = state.cand_win.hwnd().0 as isize;
     state.ai_generation += 1;
     let gen = state.ai_generation;
-
-    // 清空候选，隐藏窗口，等 AI 结果回来再显示（避免占位符闪动）
     state.all_candidates.clear();
     state.current_candidates.clear();
     state.page_offset = 0;

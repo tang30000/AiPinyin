@@ -583,8 +583,8 @@ unsafe extern "system" fn wnd_proc(
                             state.page_offset = 0;
                             crate::show_current_page(state, &raw);
                             eprintln!("[AI] 异步更新候选: {} 条", state.all_candidates.len());
-                            // 联想模式：结果出来后才定位并显示窗口（此时尺寸正确）
-                            if state.prediction_mode {
+                            // 联想态：AI结果出来后定位并显示窗口（尺寸已确定，clamping有效）
+                            if state.input.engine.is_empty() {
                                 let pt = crate::get_caret_screen_pos();
                                 state.cand_win.show(pt.x, pt.y + 4);
                             }
