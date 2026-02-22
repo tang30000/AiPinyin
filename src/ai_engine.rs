@@ -320,14 +320,15 @@ fn run_predict(
             for (i, c) in graph_cands.iter().enumerate().take(3) {
                 eprintln!("[AI]   #{}: {}", i+1, c);
             }
-            // 用 AI 对词图候选评分 (逐字累计概率)
+            // 用 AI 对词图候选评分 (前4字累计概率, 够区分)
             let mut scored: Vec<(String, f32)> = Vec::new();
             for sentence in &graph_cands {
                 let chars: Vec<char> = sentence.chars().collect();
+                let score_len = std::cmp::min(4, chars.len());
                 let mut ids = ctx_prefix.clone();
                 let mut total_score = 0.0f32;
                 let mut valid = true;
-                for ch in &chars {
+                for ch in &chars[..score_len] {
                     let ch_str = ch.to_string();
                     let ch_id = match vocab.char2id.get(&ch_str) {
                         Some(&id) => id,
@@ -683,21 +684,23 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
             let entries = dict.lookup(&py_key);
             if entries.is_empty() { continue; }
 
-            // 取权重最高的词
-            let top_entry = entries.iter().max_by_key(|c| c.weight).unwrap();
-            let word = &top_entry.word;
-            let weight = top_entry.weight as i64;
+            // 取权重最高的 top-3 词 (不只 top-1, 让 AI 做最终选择)
+            let mut sorted_entries: Vec<&crate::pinyin::Candidate> = entries.iter().collect();
+            sorted_entries.sort_by(|a, b| b.weight.cmp(&a.weight));
+            let top_words: Vec<_> = sorted_entries.iter().take(3).collect();
 
-            // 长词 bonus: 多字词优先 (避免拆成单字)
             let length_bonus = (length as i64) * 200;
-            let score = weight + length_bonus;
 
-            // 组合路径
-            for (rest_score, rest_path) in rest.iter().take(3) {
-                let total = score + rest_score;
-                let mut path = vec![word.clone()];
-                path.extend_from_slice(rest_path);
-                candidates.push((total, path));
+            for entry in &top_words {
+                let word = &entry.word;
+                let score = entry.weight as i64 + length_bonus;
+
+                for (rest_score, rest_path) in rest.iter().take(2) {
+                    let total = score + rest_score;
+                    let mut path = vec![word.clone()];
+                    path.extend_from_slice(rest_path);
+                    candidates.push((total, path));
+                }
             }
         }
 
@@ -709,7 +712,7 @@ pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
                 let sb: String = b.1.concat();
                 sa == sb
             });
-            candidates.truncate(top_k);
+            candidates.truncate(8);
             best[i] = Some(candidates);
         }
     }
