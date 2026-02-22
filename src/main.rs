@@ -10,6 +10,7 @@ pub mod pinyin;
 pub mod plugin_system;
 pub mod ui;
 pub mod user_dict;
+pub mod settings;
 
 
 use anyhow::Result;

@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <title>AiPinyin 设置</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: #1a1b26;
+            color: #c0caf5;
+            padding: 24px;
+            min-height: 100vh;
+            user-select: none;
+        }
+
+        h1 {
+            font-size: 22px;
+            margin-bottom: 20px;
+            color: #7aa2f7;
+        }
+
+        h2 {
+            font-size: 15px;
+            margin: 18px 0 10px;
+            padding: 6px 12px;
+            background: #24283b;
+            border-radius: 8px;
+            color: #bb9af7;
+        }
+
+        .section {
+            margin-bottom: 8px;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid #292e42;
+            gap: 12px;
+        }
+
+        .row:last-child {
+            border-bottom: none;
+        }
+
+        label {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        input[type="number"] {
+            width: 70px;
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid #3b4261;
+            background: #1a1b26;
+            color: #c0caf5;
+            font-size: 14px;
+            text-align: center;
+        }
+
+        input[type="color"] {
+            width: 40px;
+            height: 28px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            background: transparent;
+        }
+
+        input[type="range"] {
+            width: 120px;
+            accent-color: #7aa2f7;
+        }
+
+        select {
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid #3b4261;
+            background: #1a1b26;
+            color: #c0caf5;
+            font-size: 14px;
+        }
+
+        .val {
+            font-size: 12px;
+            color: #565f89;
+            width: 30px;
+            text-align: right;
+        }
+
+        .checkbox-row {
+            cursor: pointer;
+        }
+
+        .checkbox-row input {
+            accent-color: #7aa2f7;
+            width: 16px;
+            height: 16px;
+        }
+
+        .btn-bar {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        button {
+            padding: 10px 32px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            cursor: pointer;
+            margin: 0 8px;
+        }
+
+        .btn-save {
+            background: #7aa2f7;
+            color: #1a1b26;
+            font-weight: bold;
+        }
+
+        .btn-save:hover {
+            background: #89b4fa;
+        }
+
+        .btn-cancel {
+            background: #3b4261;
+            color: #c0caf5;
+        }
+
+        .btn-cancel:hover {
+            background: #4b5271;
+        }
+
+        .plugin-item {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-bottom: 1px solid #292e42;
+            gap: 10px;
+        }
+
+        .plugin-name {
+            flex: 1;
+            font-size: 13px;
+            font-family: monospace;
+        }
+
+        .btn-del {
+            padding: 2px 10px;
+            border-radius: 4px;
+            border: 1px solid #f7768e;
+            background: transparent;
+            color: #f7768e;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .btn-del:hover {
+            background: #f7768e22;
+        }
+
+        .status {
+            font-size: 13px;
+            color: #9ece6a;
+            margin-left: 16px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>⚙ AiPinyin 设置</h1>
+
+    <!-- 外观 -->
+    <h2>🎨 外观</h2>
+    <div class="section">
+        <div class="row">
+            <label>中文候选字号</label>
+            <input type="number" id="fontSize" min="12" max="36" value="20">
+            <span class="val">px</span>
+        </div>
+        <div class="row">
+            <label>拼音字号</label>
+            <input type="number" id="pinyinSize" min="10" max="28" value="20">
+            <span class="val">px</span>
+        </div>
+        <div class="row">
+            <label>窗口圆角</label>
+            <input type="number" id="cornerRadius" min="0" max="24" value="14">
+            <span class="val">px</span>
+        </div>
+        <div class="row">
+            <label>透明度</label>
+            <input type="range" id="opacity" min="100" max="255" value="240">
+            <span class="val" id="opacityVal">240</span>
+        </div>
+        <div class="row">
+            <label>背景色</label>
+            <input type="color" id="bgColor" value="#2E313E">
+        </div>
+        <div class="row">
+            <label>候选文字色</label>
+            <input type="color" id="textColor" value="#C8CCD8">
+        </div>
+        <div class="row">
+            <label>拼音颜色</label>
+            <input type="color" id="pinyinColor" value="#6E738C">
+        </div>
+        <div class="row">
+            <label>序号颜色</label>
+            <input type="color" id="indexColor" value="#82869C">
+        </div>
+        <div class="row">
+            <label>高亮背景</label>
+            <input type="color" id="highlightBg" value="#7AA2F7">
+        </div>
+        <div class="row">
+            <label>高亮文字</label>
+            <input type="color" id="highlightText" value="#FFFFFF">
+        </div>
+    </div>
+
+    <!-- 引擎 -->
+    <h2>🧠 引擎</h2>
+    <div class="section">
+        <div class="row">
+            <label>候选模式</label>
+            <select id="engineMode">
+                <option value="ai">AI 主导</option>
+                <option value="dict">字典主导</option>
+            </select>
+        </div>
+        <div class="row">
+            <label>AI 候选数 (top_k)</label>
+            <input type="number" id="topK" min="1" max="9" value="5">
+        </div>
+        <div class="row checkbox-row" onclick="document.getElementById('rerank').click()">
+            <label>AI 参与排序 (rerank)</label>
+            <input type="checkbox" id="rerank" checked>
+        </div>
+    </div>
+
+    <!-- 词库 -->
+    <h2>📚 词库</h2>
+    <div class="section" id="dictSection"></div>
+
+    <!-- 插件 -->
+    <h2>🔌 JS 插件</h2>
+    <div class="section" id="pluginSection">
+        <div class="row" style="color:#565f89;font-size:13px;">plugins/ 目录下无插件文件</div>
+    </div>
+
+    <div class="btn-bar">
+        <button class="btn-cancel" onclick="window.ipc.postMessage(JSON.stringify({action:'cancel'}))">取消</button>
+        <button class="btn-save" onclick="saveSettings()">💾 保存</button>
+        <span class="status" id="status">✅ 已保存</span>
+    </div>
+
+    <script>
+        const DICT_OPTIONS = [
+            { id: 'sogou_it', name: 'IT计算机 (3151条)' },
+            { id: 'sogou_city', name: '城市信息 (10万条)' },
+            { id: 'sogou_daily', name: '日常用语 (4560条)' },
+            { id: 'sogou_poem', name: '古诗词 (39万条)' },
+            { id: 'sogou_neologism', name: '网络流行新词 (1万条)' },
+            { id: 'sogou_region', name: '城市地名 (3563条)' },
+            { id: 'sogou_medical', name: '医学词汇 (145条)' },
+            { id: 'sogou_food', name: '食物 (249条)' },
+            { id: 'sogou_idiom', name: '成语 (16条)' },
+        ];
+
+        function renderDicts(enabled) {
+            const el = document.getElementById('dictSection');
+            el.innerHTML = DICT_OPTIONS.map(d => `
+                <div class="row checkbox-row" onclick="this.querySelector('input').click()">
+                    <label>${d.name}</label>
+                    <input type="checkbox" data-dict="${d.id}" ${enabled.includes(d.id) ? 'checked' : ''}>
+                </div>
+            `).join('');
+        }
+
+        function renderPlugins(plugins) {
+            const el = document.getElementById('pluginSection');
+            if (!plugins || plugins.length === 0) {
+                el.innerHTML = '<div class="row" style="color:#565f89;font-size:13px;">plugins/ 目录下无插件文件</div>';
+                return;
+            }
+            el.innerHTML = plugins.map(p => `
+                <div class="plugin-item">
+                    <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="togglePlugin('${p.name}', this.checked)">
+                    <span class="plugin-name">${p.name}</span>
+                    <button class="btn-del" onclick="deletePlugin('${p.name}')">删除</button>
+                </div>
+            `).join('');
+        }
+
+        // 透明度滑块实时显示
+        document.getElementById('opacity').addEventListener('input', function () {
+            document.getElementById('opacityVal').textContent = this.value;
+        });
+
+        // 保存设置
+        function saveSettings() {
+            const checkboxes = document.querySelectorAll('[data-dict]:checked');
+            const extra = Array.from(checkboxes).map(cb => cb.dataset.dict);
+            const data = {
+                action: 'save',
+                config: {
+                    engine_mode: document.getElementById('engineMode').value,
+                    top_k: parseInt(document.getElementById('topK').value),
+                    rerank: document.getElementById('rerank').checked,
+                    opacity: parseInt(document.getElementById('opacity').value),
+                    extra: extra,
+                },
+                style: {
+                    font_size: document.getElementById('fontSize').value + 'px',
+                    pinyin_size: document.getElementById('pinyinSize').value + 'px',
+                    corner_radius: document.getElementById('cornerRadius').value + 'px',
+                    bg_color: document.getElementById('bgColor').value,
+                    text_color: document.getElementById('textColor').value,
+                    pinyin_color: document.getElementById('pinyinColor').value,
+                    index_color: document.getElementById('indexColor').value,
+                    highlight_bg: document.getElementById('highlightBg').value,
+                    highlight_text: document.getElementById('highlightText').value,
+                },
+            };
+            window.ipc.postMessage(JSON.stringify(data));
+            const s = document.getElementById('status');
+            s.style.display = 'inline';
+            setTimeout(() => s.style.display = 'none', 2000);
+        }
+
+        function togglePlugin(name, enabled) {
+            window.ipc.postMessage(JSON.stringify({ action: 'toggle_plugin', name, enabled }));
+        }
+
+        function deletePlugin(name) {
+            if (confirm('确认删除插件 ' + name + ' ？')) {
+                window.ipc.postMessage(JSON.stringify({ action: 'delete_plugin', name }));
+                const items = document.querySelectorAll('.plugin-name');
+                items.forEach(el => { if (el.textContent === name) el.parentElement.remove(); });
+            }
+        }
+
+        // 页面加载后从注入的配置初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            if (window.__INIT_CONFIG__) {
+                const data = window.__INIT_CONFIG__;
+                const c = data.config;
+                const s = data.style;
+                document.getElementById('engineMode').value = c.engine_mode || 'ai';
+                document.getElementById('topK').value = c.top_k || 5;
+                document.getElementById('rerank').checked = c.rerank !== false;
+                document.getElementById('fontSize').value = parseInt(s.font_size) || 20;
+                document.getElementById('pinyinSize').value = parseInt(s.pinyin_size) || 20;
+                document.getElementById('cornerRadius').value = parseInt(s.corner_radius) || 14;
+                document.getElementById('opacity').value = c.opacity || 240;
+                document.getElementById('opacityVal').textContent = c.opacity || 240;
+                document.getElementById('bgColor').value = s.bg_color || '#2E313E';
+                document.getElementById('textColor').value = s.text_color || '#C8CCD8';
+                document.getElementById('pinyinColor').value = s.pinyin_color || '#6E738C';
+                document.getElementById('indexColor').value = s.index_color || '#82869C';
+                document.getElementById('highlightBg').value = s.highlight_bg || '#7AA2F7';
+                document.getElementById('highlightText').value = s.highlight_text || '#FFFFFF';
+                renderDicts(c.extra || []);
+                renderPlugins(data.plugins || []);
+            }
+        });
+    </script>
+</body>
+
+</html>

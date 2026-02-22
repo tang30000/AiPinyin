@@ -168,8 +168,10 @@ struct WindowState {
     font_pinyin: HFONT,
     font_cand: HFONT,
     font_idx: HFONT,
-    /// [JS] 按鈕在客户区的位置（用于点击检测）
+    /// [JS] 按鈕在客户区的位置
     js_btn_rect: RECT,
+    /// [⚙] 设置按钮区域
+    settings_btn_rect: RECT,
     /// 当前是否有激活的插件
     plugins_active: bool,
 }
@@ -192,6 +194,7 @@ impl WindowState {
                 font_idx:    mk_font(theme.font_sz,   FW_NORMAL.0 as i32),
                 theme,
                 js_btn_rect: RECT::default(),
+                settings_btn_rect: RECT::default(),
                 plugins_active: false,
             }
         }
@@ -483,15 +486,15 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_LBUTTONDOWN => {
-            // 点击客户区 (只有 JS 按钮区域会收到此消息)
+            // 点击客户区 (JS 按钮或 ⚙ 按钮)
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
             if !ptr.is_null() {
                 let state = &*ptr;
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                 let pt = POINT { x, y };
-                if PtInRect(&state.js_btn_rect, pt).as_bool() {
-                    show_plugin_menu(hwnd);
+                if PtInRect(&state.settings_btn_rect, pt).as_bool() {
+                    crate::settings::open_settings();
                 }
             }
             LRESULT(0)
@@ -507,7 +510,8 @@ unsafe extern "system" fn wnd_proc(
                     y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
                 };
                 let _ = ScreenToClient(hwnd, &mut pt);
-                if PtInRect(&state.js_btn_rect, pt).as_bool() {
+                if PtInRect(&state.settings_btn_rect, pt).as_bool()
+                    || PtInRect(&state.js_btn_rect, pt).as_bool() {
                     return LRESULT(1); // HTCLIENT
                 }
             }
@@ -667,6 +671,20 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
         }
         SetBkMode(hdc, TRANSPARENT);
         let _ = TextOutW(hdc, bx, by, &label_w);
+
+        // ⚙ 设置按钮 (在 JS 左边)
+        let gear: Vec<u16> = "⚙".encode_utf16().collect();
+        let mut gsz = SIZE::default();
+        GetTextExtentPoint32W(hdc, &gear, &mut gsz);
+        let gx = bx - gsz.cx - btn_pad * 3;
+        SetTextColor(hdc, state.theme.index);
+        let _ = TextOutW(hdc, gx, by, &gear);
+        state.settings_btn_rect = RECT {
+            left: gx - btn_pad,
+            top: by - btn_pad,
+            right: gx + gsz.cx + btn_pad,
+            bottom: by + gsz.cy + btn_pad,
+        };
     }
 
     if state.candidates.is_empty() { return; }
