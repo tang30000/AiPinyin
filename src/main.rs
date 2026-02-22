@@ -630,12 +630,11 @@ unsafe fn refresh_predictions(state: &mut ImeState) {
     state.ai_generation += 1;
     let gen = state.ai_generation;
 
-    // 联想模式候选窗口：用空字符串作为「拼音」显示区
-    state.all_candidates = vec!["…".into()]; // 占位，让窗口先显示
+    // 清空候选，隐藏窗口，等 AI 结果回来再显示（避免占位符闪动）
+    state.all_candidates.clear();
+    state.current_candidates.clear();
     state.page_offset = 0;
-    show_current_page(state, "→"); // 显示右箭头表示联想模式
-    let pt = get_caret_screen_pos();
-    state.cand_win.show(pt.x, pt.y + 4);
+    state.cand_win.hide();
 
     std::thread::spawn(move || {
         let state_ptr = GLOBAL_STATE;
@@ -646,7 +645,8 @@ unsafe fn refresh_predictions(state: &mut ImeState) {
         let preds = state.ai.predict_next_words(&state.history, 9);
         if preds.is_empty() || state.ai_generation != gen { return; }
 
-        AI_RESULT = Some((gen, "→".into(), preds));
+        // 用空 raw 传递（不显示箭头行）
+        AI_RESULT = Some((gen, String::new(), preds));
         let hwnd = HWND(hwnd_raw as *mut _);
         let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
     });
@@ -656,7 +656,7 @@ unsafe fn refresh_predictions(state: &mut ImeState) {
 /// 策略1: GetGUIThreadInfo — 适用于普通权限应用 (记事本、浏览器等)
 /// 策略2: GetCaretPos + ClientToScreen — 适用于同进程窗口
 /// 策略3: 鼠标位置 — 通用回退（鼠标通常在正在输入的文字旁边）
-unsafe fn get_caret_screen_pos() -> POINT {
+pub(crate) unsafe fn get_caret_screen_pos() -> POINT {
     let fg = GetForegroundWindow();
 
     // ── 策略1: GetGUIThreadInfo ──

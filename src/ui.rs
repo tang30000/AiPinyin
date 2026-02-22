@@ -577,13 +577,17 @@ unsafe extern "system" fn wnd_proc(
                 let state_ptr = crate::GLOBAL_STATE;
                 if !state_ptr.is_null() {
                     let state = &mut *state_ptr;
-                    // 只有 generation 匹配才应用 (用户没有继续打字)
                     if state.ai_generation == gen {
                         if !merged.is_empty() {
                             state.all_candidates = merged;
                             state.page_offset = 0;
                             crate::show_current_page(state, &raw);
                             eprintln!("[AI] 异步更新候选: {} 条", state.all_candidates.len());
+                            // 联想模式：结果出来后才定位并显示窗口（此时尺寸正确）
+                            if state.prediction_mode {
+                                let pt = crate::get_caret_screen_pos();
+                                state.cand_win.show(pt.x, pt.y + 4);
+                            }
                         }
                     }
                 }
