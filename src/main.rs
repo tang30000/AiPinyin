@@ -49,6 +49,10 @@ struct ImeState {
     shift_modified: bool,
     /// AI 异步推理代次号, 用于丢弃过期结果
     ai_generation: u64,
+    /// 上次上屏的 (拼音, 汉字), 用于检测退格撤销
+    last_commit: Option<(String, String)>,
+    /// 退格计数: 用户连续按了多少次退格
+    backspace_count: usize,
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -110,6 +114,8 @@ fn main() -> Result<()> {
         shift_down: false,
         shift_modified: false,
         ai_generation: 0,
+        last_commit: None,
+        backspace_count: 0,
     });
 
     unsafe {
@@ -191,6 +197,9 @@ unsafe fn cb_process_key(vkey: u32) {
                         crate::pinyin::cache_ai_word(&raw_before, &text);
                     }
                 }
+                // 记录上次上屏, 用于退格撤销
+                state.last_commit = Some((raw_before.clone(), text.clone()));
+                state.backspace_count = 0;
                 eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                     send_unicode_text(&text));
 
@@ -276,6 +285,28 @@ unsafe extern "system" fn low_level_keyboard_hook(
                 0x0D => !state.input.engine.is_empty(), // Enter
                 _ => false,
             };
+
+            // 退格撤销: 中文模式、引擎为空、按退格 → 可能在删刚才选错的词
+            if vkey == 0x08 && !should_eat && state.chinese_mode {
+                if let Some((ref py, ref word)) = state.last_commit.clone() {
+                    state.backspace_count += 1;
+                    let word_len = word.chars().count();
+                    if state.backspace_count >= word_len {
+                        // 用户删完了刚才上屏的整个词 → 撤销学习
+                        state.user_dict.unlearn(py, word);
+                        eprintln!("[IME] ⏪ 撤销学习: {} → {} (退格{}次)",
+                            py, word, state.backspace_count);
+                        state.last_commit = None;
+                        state.backspace_count = 0;
+                    }
+                }
+            } else if vkey != 0x08 {
+                // 按了非退格键 → 清除退格追踪
+                if state.last_commit.is_some() {
+                    state.last_commit = None;
+                    state.backspace_count = 0;
+                }
+            }
 
             if should_eat {
                 // 立即拦截，通过 PostMessage 异步处理（避免钩子超时）

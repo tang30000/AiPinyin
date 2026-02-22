@@ -71,6 +71,22 @@ impl UserDict {
         self.save();
     }
 
+    /// 撤销学习: 用户退格删除了刚上屏的词 → 减少计数或移除
+    pub fn unlearn(&mut self, pinyin: &str, word: &str) {
+        let key = (pinyin.to_string(), word.to_string());
+        if let Some(count) = self.entries.get_mut(&key) {
+            if *count <= 1 {
+                self.entries.remove(&key);
+                eprintln!("[UserDict] 🗑 移除 {} → {}", pinyin, word);
+            } else {
+                *count -= 1;
+                eprintln!("[UserDict] ⬇ 降权 {} → {} (count={})", pinyin, word, count);
+            }
+            self.dirty = true;
+            self.save();
+        }
+    }
+
     /// 获取某个词的用户权重（0 = 未学习过）
     pub fn get_weight(&self, pinyin: &str, word: &str) -> u32 {
         let key = (pinyin.to_string(), word.to_string());
