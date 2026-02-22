@@ -56,12 +56,12 @@ impl Default for Theme {
         Self {
             bg:         rgb(46, 49, 62),     // #2E313E
             text:       rgb(200, 204, 216),  // #C8CCD8
-            pinyin:     rgb(110, 115, 140),  // #6E738C
+            pinyin:     rgb(169, 177, 214),  // #A9B1D6
             index:      rgb(130, 134, 150),  // #82869C
             hl_bg:      rgb(122, 162, 247),  // #7AA2F7
             hl_text:    rgb(255, 255, 255),  // #FFFFFF
-            font_sz:    20,
-            pinyin_sz:  18,
+            font_sz:    24,
+            pinyin_sz:  22,
             win_radius: 14,
             pad_h:      14,
         }
@@ -650,13 +650,20 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
     {
         let btn_pad = 3i32;
 
-        // ⚙ 设置按钮 (最右)
-        SelectObject(hdc, state.font_idx);
+        // 计算拼音行的垂直中心, 用于按钮居中
+        SelectObject(hdc, state.font_pinyin);
+        let sample_py: Vec<u16> = "py".encode_utf16().collect();
+        let mut py_sz = SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &sample_py, &mut py_sz);
+        let py_mid = PAD_TOP + py_sz.cy / 2; // 拼音行垂直中心
+
+        // ⚙ 设置按钮 (最右, 用序号字体)
+        SelectObject(hdc, state.font_pinyin);
         let gear: Vec<u16> = "⚙".encode_utf16().collect();
         let mut gsz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &gear, &mut gsz);
         let gx = rc.right - gsz.cx - btn_pad * 2 - state.theme.pad_h;
-        let gy = PAD_TOP;
+        let gy = py_mid - gsz.cy / 2; // 垂直居中
         SetTextColor(hdc, state.theme.index);
         SetBkMode(hdc, TRANSPARENT);
         let _ = TextOutW(hdc, gx, gy, &gear);
@@ -665,13 +672,13 @@ unsafe fn paint(hdc: HDC, hwnd: HWND, state: &mut WindowState) {
             right: gx + gsz.cx + btn_pad, bottom: gy + gsz.cy + btn_pad,
         };
 
-        // JS 指示灯 (小, 在 ⚙ 左边)
+        // JS 指示灯 (小字体, 在 ⚙ 左边)
         SelectObject(hdc, state.font_small);
         let js_label: Vec<u16> = "JS".encode_utf16().collect();
         let mut jsz = SIZE::default();
         let _ = GetTextExtentPoint32W(hdc, &js_label, &mut jsz);
         let jx = gx - jsz.cx - btn_pad * 3;
-        let jy = gy;
+        let jy = py_mid - jsz.cy / 2; // 垂直居中
 
         state.js_btn_rect = RECT {
             left: jx - btn_pad, top: jy - btn_pad,
