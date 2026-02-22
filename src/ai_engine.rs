@@ -325,9 +325,16 @@ fn run_predict(
                 session, vocab, &initials, &ctx_prefix, vocab_size, 5,
             )?;
             
-            // 合并: beam结果 + 字典缩写候选, 统一AI评分
+            // === 缩写词图: 把首字母拆成词段匹配字典 ===
+            // "bzdzmb" → "bzd"(不知道) + "zmb"(怎么办) → "不知道怎么办"
+            let abbrev_graph_cands = abbreviation_word_graph(&initials);
+            
+            // 合并: 词图结果 + beam结果 + 字典缩写候选
             let mut all_cands: Vec<String> = Vec::new();
             let mut seen = std::collections::HashSet::new();
+            for c in &abbrev_graph_cands {
+                if seen.insert(c.clone()) { all_cands.push(c.clone()); }
+            }
             for c in &beam_results {
                 if seen.insert(c.clone()) { all_cands.push(c.clone()); }
             }
@@ -335,11 +342,17 @@ fn run_predict(
                 if seen.insert(w.clone()) { all_cands.push(w.clone()); }
             }
             
-            // 对所有候选统一打分 (前3字)
+            if all_cands.is_empty() { return Ok(vec![]); }
+            
+            eprintln!("[AI] 首字母候选: 词图{}, beam{}, 字典{}, 总{}",
+                abbrev_graph_cands.len(), beam_results.len(), 
+                dict_words.len().min(10), all_cands.len());
+            
+            // 对所有候选统一AI打分 (前4字)
             let mut scored: Vec<(String, f32)> = Vec::new();
             for word in &all_cands {
                 let chars: Vec<char> = word.chars().collect();
-                let score_len = std::cmp::min(3, chars.len());
+                let score_len = std::cmp::min(4, chars.len());
                 let mut ids = ctx_prefix.clone();
                 let mut total = 0.0f32;
                 let mut valid = true;
@@ -647,6 +660,87 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
         .map_err(|e| format!("load: {}", e))?;
     eprintln!("[AI] loaded in {:?}", start.elapsed());
     Ok(session)
+}
+
+// ============================================================
+// 缩写词图 — 把首字母序列拆分成字典词
+// ============================================================
+
+/// 缩写词图: 将首字母序列拆成字典词组合
+///
+/// 例: ["b","z","d","z","m","b"]
+///   位置0: "bzd" → 字典缩写查到 [不知道(900), 办证的(100)]
+///   位置3: "zmb" → 字典缩写查到 [怎么办(800)]
+///   → 组合: "不知道怎么办"
+fn abbreviation_word_graph(initials: &[String]) -> Vec<String> {
+    let n = initials.len();
+    if n == 0 { return vec![]; }
+    
+    let dict = match crate::pinyin::get_dict() {
+        Some(d) => d,
+        None => return vec![],
+    };
+    
+    // word_at[i] = Vec<(end_pos, word, weight)> — 从位置 i 开始匹配到的词
+    let mut word_at: Vec<Vec<(usize, String, u32)>> = vec![Vec::new(); n];
+    
+    for i in 0..n {
+        // 尝试不同长度的缩写段 (1-6个声母)
+        for len in 1..=std::cmp::min(6, n - i) {
+            let abbrev_key: String = initials[i..i+len].concat();
+            let matches = dict.lookup_abbreviation(&abbrev_key);
+            
+            // 取每个长度的 top-3 匹配
+            for entry in matches.iter().take(3) {
+                word_at[i].push((i + len, entry.word.clone(), entry.weight));
+            }
+        }
+    }
+    
+    // DP: best[i] = Vec<(score, path)>
+    let mut best: Vec<Option<Vec<(i64, Vec<String>)>>> = vec![None; n + 1];
+    best[n] = Some(vec![(0, vec![])]);
+    
+    for i in (0..n).rev() {
+        let mut candidates: Vec<(i64, Vec<String>)> = Vec::new();
+        
+        for &(j, ref word, weight) in &word_at[i] {
+            let rest = match &best[j] {
+                Some(paths) => paths,
+                None => continue,
+            };
+            // 多字词加分
+            let word_len = j - i;
+            let score = weight as i64 + (word_len as i64) * 500;
+            
+            for (rest_score, rest_path) in rest.iter().take(3) {
+                let total = score + rest_score;
+                let mut path = vec![word.clone()];
+                path.extend_from_slice(rest_path);
+                candidates.push((total, path));
+            }
+        }
+        
+        if !candidates.is_empty() {
+            candidates.sort_by(|a, b| b.0.cmp(&a.0));
+            candidates.truncate(5);
+            best[i] = Some(candidates);
+        }
+    }
+    
+    match &best[0] {
+        Some(paths) => {
+            let mut results: Vec<String> = paths.iter()
+                .take(5)
+                .map(|(_, words)| words.concat())
+                .collect();
+            // 去重
+            let mut seen = std::collections::HashSet::new();
+            results.retain(|s| seen.insert(s.clone()));
+            results
+        }
+        None => vec![],
+    }
 }
 
 /// 解析首字母序列, 处理 zh/ch/sh 复合声母
