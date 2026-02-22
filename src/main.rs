@@ -58,6 +58,8 @@ struct ImeState {
     last_commit: Option<(String, String)>,
     /// 退格计数: 用户连续按了多少次退格
     backspace_count: usize,
+    /// 联想模式: 上屏后显示下一词预测（无拼音输入）
+    prediction_mode: bool,
 }
 
 static mut GLOBAL_STATE: *mut ImeState = std::ptr::null_mut();
@@ -123,6 +125,7 @@ fn main() -> Result<()> {
         ai_generation: 0,
         last_commit: None,
         backspace_count: 0,
+        prediction_mode: false,
     });
 
     unsafe {
@@ -184,6 +187,22 @@ unsafe fn cb_process_key(vkey: u32) {
     if GLOBAL_STATE.is_null() { return; }
     let state = &mut *GLOBAL_STATE;
 
+    // 联想模式特殊处理：ESC/退格 → 退出联想; 字母键 → 退出联想转正常输入
+    if state.prediction_mode {
+        match vkey {
+            0x1B | 0x08 => { // ESC 或 退格 → 退出联想
+                state.prediction_mode = false;
+                state.cand_win.hide();
+                return;
+            }
+            0x41..=0x5A => { // A-Z → 退出联想，让正常流程处理
+                state.prediction_mode = false;
+                // 继续往下走，正常处理字母键
+            }
+            _ => {} // 数字键选词，正常流程处理
+        }
+    }
+
     // 翻页键: 直接处理, 不走 handle_key_down
     match vkey {
         0xBB | 0x22 => { // = 或 PgDn → 下一页
@@ -210,16 +229,17 @@ unsafe fn cb_process_key(vkey: u32) {
             if !text.is_empty() {
                 state.history.push(&text);  // 记录上屏历史
                 // 自学习：记录 (拼音 → 选词)
-                if !raw_before.is_empty() {
+                if !raw_before.is_empty() && !state.prediction_mode {
                     state.user_dict.learn(&raw_before, &text);
-                    // 3+字词自动缓存到主字典 (下次词图直接命中)
                     if text.chars().count() >= 3 {
                         crate::pinyin::cache_ai_word(&raw_before, &text);
                     }
                 }
                 // 记录上次上屏, 用于退格撤销
-                state.last_commit = Some((raw_before.clone(), text.clone()));
-                state.backspace_count = 0;
+                if !state.prediction_mode {
+                    state.last_commit = Some((raw_before.clone(), text.clone()));
+                    state.backspace_count = 0;
+                }
                 eprintln!("[IME] ↑ 上屏 {:?}  (sent={})", text,
                     send_unicode_text(&text));
 
@@ -229,15 +249,18 @@ unsafe fn cb_process_key(vkey: u32) {
                 state.current_candidates.clear();
 
                 if state.input.engine.is_empty() {
-                    // 全部消耗完 → 隐藏候选窗
-                    state.cand_win.hide();
+                    // 拼音消耗完毛 → 进入联想模式（预测下一词）
+                    state.prediction_mode = true;
+                    refresh_predictions(state);
+                    return;
                 } else {
                     // 还有剩余音节 → 立即刷新候选
+                    state.prediction_mode = false;
                     eprintln!("[IME] 剩余: {:?} → {:?}",
                         state.input.engine.raw_input(),
                         state.input.engine.syllables());
                     refresh_candidates(state);
-                    return;  // 已经 refresh 了, 不要重复
+                    return;
                 }
             }
         }
@@ -567,7 +590,39 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
 }
 
 
-/// 多策略获取光标屏幕坐标
+/// 联想模式：上屏后预测下一词（无拼音约束，纯 AI 上下文预测）
+unsafe fn refresh_predictions(state: &mut ImeState) {
+    if !state.ai.is_available() {
+        state.cand_win.hide();
+        state.prediction_mode = false;
+        return;
+    }
+    let hwnd_raw = state.cand_win.hwnd().0 as isize;
+    state.ai_generation += 1;
+    let gen = state.ai_generation;
+
+    // 联想模式候选窗口：用空字符串作为「拼音」显示区
+    state.all_candidates = vec!["…".into()]; // 占位，让窗口先显示
+    state.page_offset = 0;
+    show_current_page(state, "→"); // 显示右箭头表示联想模式
+    let pt = get_caret_screen_pos();
+    state.cand_win.show(pt.x, pt.y + 4);
+
+    std::thread::spawn(move || {
+        let state_ptr = GLOBAL_STATE;
+        if state_ptr.is_null() { return; }
+        let state = &mut *state_ptr;
+        if state.ai_generation != gen { return; }
+
+        let preds = state.ai.predict_next_words(&state.history, 9);
+        if preds.is_empty() || state.ai_generation != gen { return; }
+
+        AI_RESULT = Some((gen, "→".into(), preds));
+        let hwnd = HWND(hwnd_raw as *mut _);
+        let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
+    });
+}
+
 ///
 /// 策略1: GetGUIThreadInfo — 适用于普通权限应用 (记事本、浏览器等)
 /// 策略2: GetCaretPos + ClientToScreen — 适用于同进程窗口

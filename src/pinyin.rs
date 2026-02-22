@@ -393,6 +393,17 @@ impl Dictionary {
         }
     }
 
+    /// 以汉字开头的常用词（用于联想扩展，如「时」→「时间」「时候」）
+    pub fn lookup_prefix_char(&self, ch: &str) -> Vec<String> {
+        // 直接遍历 all 中首字匹配的 2 字词，取权重最高的前 3 条
+        let mut result: Vec<(&Candidate, u32)> = self.all.iter()
+            .filter(|c| c.word.chars().count() == 2 && c.word.starts_with(ch))
+            .map(|c| (c, c.weight))
+            .collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1));
+        result.into_iter().take(3).map(|(c, _)| c.word.clone()).collect()
+    }
+
     /// 提升候选词权重
     pub fn boost_weight(&mut self, pinyin: &str, word: &str, amount: u32) {
         if let Some(cands) = self.exact.get_mut(pinyin) {

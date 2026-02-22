@@ -250,6 +250,76 @@ impl AIPredictor {
         }
     }
 
+    /// 无拼音约束的「下一词联想」
+    ///
+    /// 上屏后调用，根据历史上下文预测下一个最可能的字/词。
+    /// 返回 top_k 个候选（先 AI 高频字，再展开为 2 字词）。
+    pub fn predict_next_words(
+        &mut self, context: &HistoryBuffer, top_k: usize,
+    ) -> Vec<String> {
+        let session = match &mut self.state {
+            AIState::Ready(s) => s, _ => return vec![],
+        };
+        let vocab = match &self.vocab {
+            Some(v) => v, None => return vec![],
+        };
+        let ctx_str = context.context_string();
+        // 构建上下文 ids
+        let ctx_ids: Vec<i64> = ctx_str.chars()
+            .filter_map(|c| vocab.char2id.get(&c.to_string()).copied())
+            .collect();
+        // 至少给一个 CLS token
+        let mut ids = if ctx_ids.is_empty() {
+            vec![vocab.cls_id]
+        } else {
+            let mut v = vec![vocab.cls_id];
+            v.extend_from_slice(&ctx_ids);
+            v
+        };
+        // 加 SEP 标记结束上文
+        ids.push(vocab.sep_id);
+
+        let logits = match run_inference(session, &ids) {
+            Ok(l) => l, Err(_) => return vec![],
+        };
+        // vocab_size = logits总长 / seq_len（每个token位置输出一组logits）
+        let seq_len = ids.len();
+        if logits.is_empty() || logits.len() % seq_len != 0 { return vec![]; }
+        let vocab_size = logits.len() / seq_len;
+        let offset = (seq_len - 1) * vocab_size;
+        if offset + vocab_size > logits.len() { return vec![]; }
+
+        // 无约束 top-k：直接取概率最高的字
+        let mut scored: Vec<(i64, f32)> = logits[offset..offset + vocab_size]
+            .iter().enumerate()
+            .filter(|(i, _)| *i >= 4) // 跳过特殊 token
+            .map(|(i, &s)| (i as i64, s))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 收集候选：对每个顶级字，先尝试 dict 中以该字起始的常用词
+        let dict = crate::pinyin::get_dict();
+        let mut result: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for (id, _) in scored.iter().take(top_k * 2) {
+            let ch = match vocab.id2char.get(id) { Some(c) => c.clone(), None => continue };
+            // 先尝试 dict 里以该字开头的词（如「时」→「时间」「时候」「时代」）
+            if let Some(dict_ref) = dict.as_ref() {
+                let prefix_cands = dict_ref.lookup_prefix_char(&ch);
+                for w in prefix_cands.into_iter().take(2) {
+                    if w.chars().count() == 2 && seen.insert(w.clone()) {
+                        result.push(w);
+                    }
+                }
+            }
+            // 单字作为保底
+            if seen.insert(ch.clone()) { result.push(ch); }
+            if result.len() >= top_k { break; }
+        }
+        result
+    }
+
     /// 字典辅助: 上下文感知重排
     pub fn rerank(
         &mut self, pinyin: &str, candidates: Vec<String>, context: &HistoryBuffer,
