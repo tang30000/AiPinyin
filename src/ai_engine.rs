@@ -312,7 +312,46 @@ fn run_predict(
         return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
-    // === 多音节: 字典引导评分 ===
+    // === 3+音节: 词图分词 → AI 评分 ===
+    if syllables.len() >= 3 {
+        let graph_cands = word_graph_segment(&syllables, 5);
+        if !graph_cands.is_empty() {
+            eprintln!("[AI] 词图分词: {} 条", graph_cands.len());
+            for (i, c) in graph_cands.iter().enumerate().take(3) {
+                eprintln!("[AI]   #{}: {}", i+1, c);
+            }
+            // 用 AI 对词图候选评分 (逐字累计概率)
+            let mut scored: Vec<(String, f32)> = Vec::new();
+            for sentence in &graph_cands {
+                let chars: Vec<char> = sentence.chars().collect();
+                let mut ids = ctx_prefix.clone();
+                let mut total_score = 0.0f32;
+                let mut valid = true;
+                for ch in &chars {
+                    let ch_str = ch.to_string();
+                    let ch_id = match vocab.char2id.get(&ch_str) {
+                        Some(&id) => id,
+                        None => { valid = false; break; }
+                    };
+                    let logits = run_inference(session, &ids)?;
+                    let offset = (ids.len() - 1) * vocab_size;
+                    if offset + ch_id as usize >= logits.len() { valid = false; break; }
+                    total_score += logits[offset + ch_id as usize];
+                    ids.push(ch_id);
+                }
+                if valid {
+                    scored.push((sentence.clone(), total_score));
+                }
+            }
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            if !scored.is_empty() {
+                let result: Vec<String> = scored.into_iter().take(top_k).map(|(s, _)| s).collect();
+                return Ok(result);
+            }
+        }
+    }
+
+    // === 2音节: 字典引导评分 ===
     let target_len = syllables.len();
     let candidates: Vec<&String> = dict_words.iter()
         .filter(|w| w.chars().count() == target_len)
@@ -601,6 +640,88 @@ fn load_model(path: &Path) -> Result<ort::session::Session, String> {
         .map_err(|e| format!("load: {}", e))?;
     eprintln!("[AI] loaded in {:?}", start.elapsed());
     Ok(session)
+}
+
+// ============================================================
+// 词图分词 — 长输入拆分为字典词组
+// ============================================================
+
+/// 词图最短路径分词: 将音节序列拆分为字典中的词组
+///
+/// 例: ["zhi","chi","de","zen","me","yang"] 
+///   → "支持的怎么样" (匹配 支持 + 的 + 怎么 + 样)
+///
+/// 返回 top-K 完整句子候选 (按词频权重排序)
+pub fn word_graph_segment(syllables: &[String], top_k: usize) -> Vec<String> {
+    let n = syllables.len();
+    if n == 0 { return vec![]; }
+
+    // 获取全局字典
+    let dict = match crate::pinyin::get_dict() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    // DP: best[i] = Vec<(score, path)> 从位置 i 到末尾的最佳分词
+    // 保留 top-K 条路径
+    let mut best: Vec<Option<Vec<(i64, Vec<String>)>>> = vec![None; n + 1];
+    best[n] = Some(vec![(0, vec![])]);
+
+    for i in (0..n).rev() {
+        let mut candidates: Vec<(i64, Vec<String>)> = Vec::new();
+
+        // 尝试匹配长度 1~min(6, n-i) 的词组
+        for length in 1..=std::cmp::min(6, n - i) {
+            let j = i + length;
+            let rest = match &best[j] {
+                Some(paths) => paths,
+                None => continue,
+            };
+
+            // 拼接这几个音节
+            let py_key: String = syllables[i..j].concat();
+            let entries = dict.lookup(&py_key);
+            if entries.is_empty() { continue; }
+
+            // 取权重最高的词
+            let top_entry = entries.iter().max_by_key(|c| c.weight).unwrap();
+            let word = &top_entry.word;
+            let weight = top_entry.weight as i64;
+
+            // 长词 bonus: 多字词优先 (避免拆成单字)
+            let length_bonus = (length as i64) * 200;
+            let score = weight + length_bonus;
+
+            // 组合路径
+            for (rest_score, rest_path) in rest.iter().take(3) {
+                let total = score + rest_score;
+                let mut path = vec![word.clone()];
+                path.extend_from_slice(rest_path);
+                candidates.push((total, path));
+            }
+        }
+
+        if !candidates.is_empty() {
+            // 按分数降序排序, 保留 top-K
+            candidates.sort_by(|a, b| b.0.cmp(&a.0));
+            candidates.dedup_by(|a, b| {
+                let sa: String = a.1.concat();
+                let sb: String = b.1.concat();
+                sa == sb
+            });
+            candidates.truncate(top_k);
+            best[i] = Some(candidates);
+        }
+    }
+
+    match &best[0] {
+        Some(paths) => {
+            paths.iter()
+                .map(|(_, words)| words.concat())
+                .collect()
+        }
+        None => vec![],
+    }
 }
 
 fn log_model_info(session: &ort::session::Session) {

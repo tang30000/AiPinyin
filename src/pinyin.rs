@@ -208,6 +208,11 @@ pub struct Candidate {
 
 static DICT: OnceLock<Dictionary> = OnceLock::new();
 
+/// 获取全局字典引用 (供 ai_engine 词图分词使用)
+pub fn get_dict() -> Option<&'static Dictionary> {
+    DICT.get()
+}
+
 pub struct Dictionary {
     /// 精确匹配: "shi" -> [是, 时, ...]
     exact: HashMap<String, Vec<Candidate>>,
