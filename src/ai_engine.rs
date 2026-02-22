@@ -348,11 +348,12 @@ fn run_predict(
                 abbrev_graph_cands.len(), beam_results.len(), 
                 dict_words.len().min(10), all_cands.len());
             
-            // 对所有候选统一AI打分 (前4字)
+            // 对候选统一 AI 打分，最多评 4 个（避免首字母长串过慢）
+            let score_cap = std::cmp::min(4, all_cands.len());
             let mut scored: Vec<(String, f32)> = Vec::new();
-            for word in &all_cands {
+            for word in &all_cands[..score_cap] {
                 let chars: Vec<char> = word.chars().collect();
-                let score_len = std::cmp::min(4, chars.len());
+                let score_len = std::cmp::min(3, chars.len()); // 最多看前3字
                 let mut ids = ctx_prefix.clone();
                 let mut total = 0.0f32;
                 let mut valid = true;
@@ -369,6 +370,10 @@ fn run_predict(
                     ids.push(ch_id);
                 }
                 if valid { scored.push((word.clone(), total)); }
+            }
+            // 未评分的候选直接追加
+            for word in &all_cands[score_cap..] {
+                scored.push((word.clone(), f32::NEG_INFINITY));
             }
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             return Ok(scored.into_iter().take(top_k).map(|(w, _)| w).collect());
@@ -394,64 +399,41 @@ fn run_predict(
         return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
-    // === 2+音节: 词图分词 → AI 评分 + AI贪心兜底 ===
+    // === 2+音节: Beam Search 主导 + 词图兜底 ===
+    //
+    // 性能关键: 跳过逐候选 AI 评分循环（N_cands × N_chars 次推理）。
+    // Beam Search 输出已按累计 AI 分排好序，直接使用即可。
     if syllables.len() >= 2 {
-        let graph_cands = word_graph_segment(&syllables, 8);
-        
-        // AI 贪心生成 (不依赖字典, 纯 AI 逐字预测)
-        let greedy = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, 5)
+        // AI Beam Search: 已按 AI 分从高到低排列
+        let beam_results = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k)
             .unwrap_or_default();
 
-        // 合并候选: 词图 + 字典 + AI贪心
-        let mut all_cands: Vec<String> = Vec::new();
+        // 词图分词：字典多词覆盖（纯查表，O(1)，无推理开销）
+        let graph_cands = word_graph_segment(&syllables, 5);
+
+        // 合并: AI beam 优先，词图 + 字典补充剩余位置
+        let mut result: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for c in &graph_cands {
-            if seen.insert(c.clone()) { all_cands.push(c.clone()); }
+
+        // 1. AI beam（最高质量）
+        for w in &beam_results {
+            if seen.insert(w.clone()) { result.push(w.clone()); }
         }
-        // 字典候选也加入
+        // 2. 字典精确匹配（长度一致的词）
         let target_len = syllables.len();
-        for w in dict_words.iter().filter(|w| w.chars().count() == target_len).take(5) {
-            if seen.insert(w.clone()) { all_cands.push(w.clone()); }
+        for w in dict_words.iter().filter(|w| w.chars().count() == target_len).take(3) {
+            if seen.insert(w.clone()) { result.push(w.clone()); }
         }
-        for g in &greedy {
-            if seen.insert(g.clone()) { all_cands.push(g.clone()); }
+        // 3. 词图（短词拼接兜底）
+        for w in &graph_cands {
+            if seen.insert(w.clone()) { result.push(w.clone()); }
         }
 
-        if !all_cands.is_empty() {
-            eprintln!("[AI] 词图+贪心: {} 条 (词图{}, 贪心{})",
-                all_cands.len(), graph_cands.len(), greedy.len());
-            for (i, c) in all_cands.iter().enumerate().take(3) {
-                eprintln!("[AI]   #{}: {}", i+1, c);
-            }
-            // 用 AI 对所有候选评分
-            let mut scored: Vec<(String, f32)> = Vec::new();
-            for sentence in &all_cands {
-                let chars: Vec<char> = sentence.chars().collect();
-                let score_len = std::cmp::min(4, chars.len());
-                let mut ids = ctx_prefix.clone();
-                let mut total_score = 0.0f32;
-                let mut valid = true;
-                for ch in &chars[..score_len] {
-                    let ch_str = ch.to_string();
-                    let ch_id = match vocab.char2id.get(&ch_str) {
-                        Some(&id) => id,
-                        None => { valid = false; break; }
-                    };
-                    let logits = run_inference(session, &ids)?;
-                    let offset = (ids.len() - 1) * vocab_size;
-                    if offset + ch_id as usize >= logits.len() { valid = false; break; }
-                    total_score += logits[offset + ch_id as usize];
-                    ids.push(ch_id);
-                }
-                if valid {
-                    scored.push((sentence.clone(), total_score));
-                }
-            }
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            if !scored.is_empty() {
-                let result: Vec<String> = scored.into_iter().take(top_k).map(|(s, _)| s).collect();
-                return Ok(result);
-            }
+        if !result.is_empty() {
+            eprintln!("[AI] beam+词图: {} 条 (beam={}, 图={}, 字典={})",
+                result.len(), beam_results.len(), graph_cands.len(),
+                dict_words.iter().filter(|w| w.chars().count() == target_len).count().min(3));
+            return Ok(result.into_iter().take(top_k).collect());
         }
     }
 
