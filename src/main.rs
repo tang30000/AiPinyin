@@ -585,6 +585,8 @@ unsafe fn trigger_next_prediction(state: &mut ImeState) {
     let hwnd_raw = state.cand_win.hwnd().0 as isize;
     state.ai_generation += 1;
     let gen = state.ai_generation;
+    // 记下刚上屏的词，用于去重（防止"为了"一直循环推荐"为了"）
+    let last_word = state.history.recent(1).first().map(|s| s.to_string()).unwrap_or_default();
     state.all_candidates.clear();
     state.current_candidates.clear();
     state.page_offset = 0;
@@ -596,10 +598,16 @@ unsafe fn trigger_next_prediction(state: &mut ImeState) {
         let state = &mut *state_ptr;
         if state.ai_generation != gen { return; }
 
-        let preds = state.ai.predict_next_words(&state.history, 9);
-        if preds.is_empty() || state.ai_generation != gen { return; }
+        let mut preds = state.ai.predict_next_words(&state.history, 12);
+        if state.ai_generation != gen { return; }
 
-        // 用空 raw 传递（不显示箭头行）
+        // 去掉与刚上屏词完全相同的候选，避免立即循环重复
+        if !last_word.is_empty() {
+            preds.retain(|w| w != &last_word);
+        }
+        preds.truncate(9);
+        if preds.is_empty() { return; }
+
         AI_RESULT = Some((gen, String::new(), preds));
         let hwnd = HWND(hwnd_raw as *mut _);
         let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
