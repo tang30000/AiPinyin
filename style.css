@@ -25,9 +25,9 @@
     /* 选中项文字颜色         */
 
     /* ── 字号 ── */
-    --font-size: 24px;
+    --font-size: 20px;
     /* 候选汉字字号           */
-    --pinyin-size: 22px;
+    --pinyin-size: 20px;
     /* 上排拼音字号           */
 
     /* ── 形状 ── */
