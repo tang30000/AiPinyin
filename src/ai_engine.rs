@@ -690,9 +690,28 @@ fn abbreviation_word_graph(initials: &[String]) -> Vec<String> {
             let abbrev_key: String = initials[i..i+len].concat();
             let matches = dict.lookup_abbreviation(&abbrev_key);
             
+            if !matches.is_empty() {
+                eprintln!("[缩写词图] pos={} key='{}' → {} 条 (top: {})",
+                    i, abbrev_key, matches.len(), matches[0].word);
+            }
+            
             // 取每个长度的 top-3 匹配
             for entry in matches.iter().take(3) {
                 word_at[i].push((i + len, entry.word.clone(), entry.weight));
+            }
+        }
+    }
+    
+    // 为没有缩写匹配的位置添加单字兜底
+    for i in 0..n {
+        if word_at[i].is_empty() {
+            // 用该声母对应的最常用单字
+            let initial = &initials[i];
+            let single_chars = dict.lookup_prefix(initial);
+            for entry in single_chars.iter().take(3) {
+                if entry.word.chars().count() == 1 {
+                    word_at[i].push((i + 1, entry.word.clone(), entry.weight));
+                }
             }
         }
     }
@@ -737,9 +756,13 @@ fn abbreviation_word_graph(initials: &[String]) -> Vec<String> {
             // 去重
             let mut seen = std::collections::HashSet::new();
             results.retain(|s| seen.insert(s.clone()));
+            eprintln!("[缩写词图] 结果: {} 条: {:?}", results.len(), results);
             results
         }
-        None => vec![],
+        None => {
+            eprintln!("[缩写词图] 无法完整覆盖所有位置");
+            vec![]
+        }
     }
 }
 
