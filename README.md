@@ -60,7 +60,7 @@
 | 项目 | 说明 |
 |------|------|
 | 架构 | GPT-2 Chinese (12 层, 12 头, 768 维, 102.4M 参数) |
-| 格式 | ONNX (`weights.onnx`, ~13 MB) |
+| 格式 | ONNX (`gpt2_int8.onnx`, ~13 MB / 98 MB) |
 | 推理 | ONNX Runtime 动态加载，后台线程异步推理 |
 | 词表 | `char2id.json` (汉字→ID) + `pinyin2id.json` (拼音→ID) |
 
@@ -183,7 +183,7 @@ cargo build --release
 
 ```
 aipinyin.exe
-weights.onnx          # AI 模型权重
+gpt2_int8.onnx        # AI 模型权重 (INT8量化版)
 char2id.json          # 汉字词表
 pinyin2id.json        # 拼音词表
 vocab_meta.json       # 词表元数据

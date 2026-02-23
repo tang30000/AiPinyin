@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>AiPinyin UI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="ime-bar">
+        <div id="pinyin"></div>
+        <div id="candidates"></div>
+    </div>
+    <div id="settings-panel">
+        <h1>AiPinyin Settings</h1>
+        <p>You can customize styles by editing the <code>ui/style.css</code> file directly!</p>
+        <button onclick="window.ipc.postMessage(JSON.stringify({action: 'close_settings'}))">Close Settings</button>
+    </div>
+
+    <!-- 加载主要的交互逻辑 -->
+    <script src="script.js"></script>
+</body>
+
+</html>

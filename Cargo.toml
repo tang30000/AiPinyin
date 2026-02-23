@@ -51,6 +51,12 @@ jieba-rs = "0.7"
 tao = "0.33"
 wry = "0.49"
 
+# 本地 AI HTTP 服务器（OpenAI 兼容接口）
+tiny_http = "0.12"
+
+# HTTP 客户端（调用本地或外部 AI 服务）
+ureq = { version = "2", features = ["json"] }
+
 [profile.release]
 opt-level = "z"     # 最小体积优化
 lto = true          # 链接时优化

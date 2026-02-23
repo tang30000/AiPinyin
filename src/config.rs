@@ -52,15 +52,40 @@ pub struct AiConfig {
     /// AI 是否参与字典候选排序
     #[serde(default)]
     pub rerank: bool,
+    /// AI 服务地址（空 = 使用本地内嵌服务）
+    /// 兼容任意 OpenAI /v1/chat/completions 接口，如:
+    ///   http://localhost:11434/v1  (Ollama)
+    ///   https://api.openai.com/v1 (ChatGPT)
+    #[serde(default)]
+    pub endpoint: String,
+    /// 外部 AI 服务 API Key（本地服务留空）
+    #[serde(default)]
+    pub api_key: String,
+    /// 发送给 AI 的系统提示词（空 = 使用内置默认中文提示词）
+    #[serde(default)]
+    pub system_prompt: String,
 }
 
 fn default_top_k() -> usize { 9 }
 
+fn default_system_prompt() -> &'static str {
+    "你是拼音输入法候选词排序助手。根据上下文和拼音，从候选列表中选出最合适的词语并排序。\
+每行输出一个词语，可选带分数（格式：词语:分数），分数为浮点数，分值越高越优先。\
+若不确定分数，直接输出词语即可，按优先级从高到低排列。"
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
-        Self { top_k: default_top_k(), rerank: false }
+        Self {
+            top_k: default_top_k(),
+            rerank: false,
+            endpoint: String::new(),
+            api_key: String::new(),
+            system_prompt: String::new(),
+        }
     }
 }
+
 
 /// UI 配置
 #[derive(Debug, Deserialize, Clone)]

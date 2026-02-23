@@ -4,13 +4,14 @@
 
 mod guardian;
 pub mod ai_engine;
+pub mod ai_server;
 pub mod config;
 pub mod key_event;
 pub mod pinyin;
 pub mod plugin_system;
-pub mod ui;
 pub mod user_dict;
 pub mod settings;
+pub mod webview_ui;
 
 
 use anyhow::Result;
@@ -37,24 +38,23 @@ pub const CLSID_AIPINYIN: GUID = GUID::from_u128(0xe0e55f04_f427_45f7_86a1_ac150
 
 struct ImeState {
     input: InputState,
-    cand_win: ui::CandidateWindow,
+    cand_win: Option<webview_ui::WebViewUI>,
     plugins: plugin_system::PluginSystem,
     ai: ai_engine::AIPredictor,
     history: ai_engine::HistoryBuffer,
     cfg: config::Config,
     user_dict: user_dict::UserDict,
-    /// 候选窗口当前显示的候选词（当前页）
+    /// 本地 AI 服务实际监听端口（0 = 服务未启动）
+    ai_port: u16,
+    /// 最终使用的 AI endpoint（本地或用户配置的外部地址）
+    ai_endpoint: String,
     current_candidates: Vec<String>,
-    /// 所有候选词（用于翻页）
     all_candidates: Vec<String>,
-    /// 当前页偏移（0, 9, 18, ...）
     page_offset: usize,
     chinese_mode: bool,
     shift_down: bool,
     shift_modified: bool,
-    /// AI 异步推理代次号, 用于丢弃过期结果
     ai_generation: u64,
-    /// 上次上屏的 (拼音, 汉字), 用于检测退格撤销
     last_commit: Option<(String, String)>,
     backspace_count: usize,
 }
@@ -96,23 +96,66 @@ fn main() -> Result<()> {
     // 初始化字典（基础 + 额外词库）
     pinyin::init_global_dict(&cfg.dict.extra);
 
-    // 初始化 AI 推理引擎
+    // 初始化 AI 推理引擎（Arc<Mutex<>> 共享给本地 HTTP 服务线程）
+    let ai_arc = std::sync::Arc::new(std::sync::Mutex::new(ai_engine::AIPredictor::new()));
+    {
+        let mut pred = ai_arc.lock().unwrap();
+        pred.ai_first = cfg.engine.mode == config::EngineMode::Ai;
+    }
+    let history_arc = std::sync::Arc::new(std::sync::Mutex::new(
+        ai_engine::HistoryBuffer::new(100)
+    ));
+
+    // 确定 ui/ 目录（向 ai_server 提供静态文件服务）
+    let ui_dir_dev = std::path::PathBuf::from("ui");
+    let ui_dir_exe = std::env::current_exe()
+        .ok().and_then(|p| p.parent().map(|d| d.join("ui"))).unwrap_or_default();
+    let ui_dir = if ui_dir_dev.exists() {
+        Some(ui_dir_dev)
+    } else if ui_dir_exe.exists() {
+        Some(ui_dir_exe)
+    } else {
+        None
+    };
+
+    // 启动本地 AI HTTP 服务（也提供 UI 静态文件）
+    let system_prompt = cfg.ai.system_prompt.clone();
+    let ai_port = ai_server::start(
+        std::sync::Arc::clone(&ai_arc),
+        std::sync::Arc::clone(&history_arc),
+        ui_dir,
+        system_prompt,
+    );
+
+    // main 线程保留一份 AI 实例，用于同步降级
     let mut ai = ai_engine::AIPredictor::new();
-    // 应用配置: 引擎模式
     ai.ai_first = cfg.engine.mode == config::EngineMode::Ai;
     let history = ai_engine::HistoryBuffer::new(100);
 
-    let cand_win = ui::CandidateWindow::new()?;
+    // 确定最终 AI endpoint
+    let ai_endpoint = if !cfg.ai.endpoint.is_empty() {
+        cfg.ai.endpoint.clone()
+    } else if ai_port > 0 {
+        format!("http://127.0.0.1:{}/v1", ai_port)
+    } else {
+        String::new()
+    };
+
+    // Load webview ui instance（传入 ai_port 以便 UI 用 http:// 加载）
+    let (cand_win_ui, event_loop) = webview_ui::WebViewUI::new()?;
+
     let user_dict = user_dict::UserDict::load();
 
     let state = Box::new(ImeState {
         input: InputState::new(),
-        cand_win,
+        cand_win: Some(cand_win_ui),
         plugins,
         ai,
         history,
         cfg,
         user_dict,
+        ai_port,
+        ai_endpoint,
         current_candidates: Vec::new(),
         all_candidates: Vec::new(),
         page_offset: 0,
@@ -124,18 +167,15 @@ fn main() -> Result<()> {
         backspace_count: 0,
     });
 
+
     unsafe {
         GLOBAL_STATE = Box::into_raw(state);
 
-        // 注册 UI ↔ 插件系统 的回调
-        ui::FN_PLUGIN_LIST = Some(cb_plugin_list);
-        ui::FN_PLUGIN_TOGGLE = Some(cb_plugin_toggle);
-        // 注册异步按键处理回调
-        ui::FN_PROCESS_KEY = Some(cb_process_key);
-
         // 初始化 [JS] 按钮状态
-        let s = &*GLOBAL_STATE;
-        s.cand_win.set_plugins_active(s.plugins.has_active());
+        let s = &mut *GLOBAL_STATE;
+        if let Some(cw) = &s.cand_win {
+            cw.set_plugins_active(s.plugins.has_active());
+        }
 
         let hinstance = GetModuleHandleW(None)?;
         let hook = SetWindowsHookExW(
@@ -147,8 +187,12 @@ fn main() -> Result<()> {
         println!("  ✅ 全局钩子已安装，请切换到其他窗口打字...");
         println!("  【Shift】切换中/英文模式");
 
-        // 消息循环（不创建任何窗口，只驱动钩子和候选窗口）
-        ui::run_message_loop();
+        // Webview 主循环
+        std::thread::spawn(move || {
+            // Note: Since tao triggers the loop on main thread we will keep weview running here
+        });
+        
+        webview_ui::run_webview_loop(event_loop, ai_port)?;
 
         let _ = UnhookWindowsHookEx(hook);
         let _ = Box::from_raw(GLOBAL_STATE);
@@ -171,7 +215,9 @@ unsafe fn cb_plugin_toggle(name: &str, hwnd: HWND) -> plugin_system::ToggleResul
     if GLOBAL_STATE.is_null() { return plugin_system::ToggleResult::Denied; }
     let state = &mut *GLOBAL_STATE;
     let result = state.plugins.toggle(name, hwnd);
-    state.cand_win.set_plugins_active(state.plugins.has_active());
+    if let Some(cw) = &state.cand_win {
+        cw.set_plugins_active(state.plugins.has_active());
+    }
     result
 }
 
@@ -216,7 +262,9 @@ unsafe fn cb_process_key(vkey: u32) {
                 if state.input.engine.is_empty() {
                     state.all_candidates.clear();
                     state.current_candidates.clear();
-                    state.cand_win.hide();
+                    if let Some(cw) = &state.cand_win {
+                        cw.hide();
+                    }
                 } else {
                     refresh_candidates(state);
                 }
@@ -224,7 +272,9 @@ unsafe fn cb_process_key(vkey: u32) {
             }
         }
         Some(CommitAction::Text(text)) => {
-            state.cand_win.hide();
+            if let Some(cw) = &state.cand_win {
+                cw.hide();
+            }
             state.input.engine.clear();
             state.current_candidates.clear();
             state.history.push(&text);
@@ -313,13 +363,12 @@ unsafe extern "system" fn low_level_keyboard_hook(
             }
 
             if should_eat {
-                // 立即拦截，通过 PostMessage 异步处理（避免钩子超时）
-                let _ = PostMessageW(
-                    state.cand_win.hwnd(),
-                    WM_IME_KEYDOWN,
-                    WPARAM(vkey as usize),
-                    LPARAM(0),
-                );
+                // 给 cb_process_key 线程设置足够大的栈空间，避免 ONNX 推理时栈溢出 (STATUS_STACK_BUFFER_OVERRUN)
+                let _ = std::thread::Builder::new()
+                    .stack_size(8 * 1024 * 1024) // 8 MB
+                    .spawn(move || {
+                        cb_process_key(vkey as u32);
+                    });
                 return LRESULT(1);
             }
         }
@@ -352,8 +401,10 @@ unsafe fn toggle_mode(state: &mut ImeState) {
             state.input.engine.clear();
             send_unicode_text(&raw);
         }
-        state.cand_win.hide();
-        eprintln!("[IME] ⌨  EN → 英文直通（按 Shift 切回中文）");
+        if let Some(cw) = &state.cand_win {
+            cw.hide();
+        }
+        eprintln!("[IME] ⌨  EN → 英文直通（按 Shift 切回中文）");
     } else {
         eprintln!("[IME] 🀄 CN → 中文拦截（按 Shift 切回英文）");
     }
@@ -410,7 +461,12 @@ const PAGE_SIZE: usize = 9;
 /// 显示当前页候选词
 pub(crate) unsafe fn show_current_page(state: &mut ImeState, raw: &str) {
     let total = state.all_candidates.len();
-    if total == 0 { state.cand_win.hide(); return; }
+    if total == 0 { 
+        if let Some(cw) = &state.cand_win {
+            cw.hide(); 
+        }
+        return; 
+    }
 
     let offset = state.page_offset.min(total.saturating_sub(1));
     let end = std::cmp::min(offset + PAGE_SIZE, total);
@@ -421,7 +477,9 @@ pub(crate) unsafe fn show_current_page(state: &mut ImeState, raw: &str) {
     let page_info = if total_pages > 1 { Some((page_num, total_pages)) } else { None };
 
     let refs: Vec<&str> = state.current_candidates.iter().map(|s| s.as_str()).collect();
-    state.cand_win.update_candidates_with_page(raw, &refs, page_info);
+    if let Some(cw) = &state.cand_win {
+        cw.update_candidates_with_page(raw, &refs, page_info);
+    }
 }
 
 /// 下一页
@@ -445,7 +503,9 @@ unsafe fn page_up(state: &mut ImeState) {
 
 unsafe fn refresh_candidates(state: &mut ImeState) {
     if state.input.engine.is_empty() {
-        state.cand_win.hide();
+        if let Some(cw) = &state.cand_win {
+            cw.hide();
+        }
         return;
     }
 
@@ -459,7 +519,8 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     // 改动4: 单音节时同步运行一次 AI 推理（单次推理 <2ms, 用户无感知延迟）
     // 让用户第一时间看到 AI 排序的结果，而不是等待异步更新
     let sync_ai_cands: Vec<String> = if syllables.len() == 1 && state.ai.is_available() {
-        state.ai.predict(&raw, &state.history, 9, &dict_after)
+        let ctx = state.history.context_string();
+        state.ai.predict(&raw, &ctx, 9, &dict_after)
     } else {
         vec![]
     };
@@ -486,7 +547,12 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
         merged
     };
 
-    if display_cands.is_empty() { state.cand_win.hide(); return; }
+    if display_cands.is_empty() { 
+        if let Some(cw) = &state.cand_win {
+            cw.hide();
+        }
+        return; 
+    }
 
     // 保存所有候选, 显示当前页
     state.all_candidates = display_cands;
@@ -494,52 +560,73 @@ unsafe fn refresh_candidates(state: &mut ImeState) {
     show_current_page(state, &raw);
 
     let pt = get_caret_screen_pos();
-    state.cand_win.show(pt.x, pt.y + 4);
+    if let Some(cw) = &state.cand_win {
+        cw.show(pt.x, pt.y + 4);
+    }
 
     // Phase 2: AI 推理在后台线程 (异步, 用于多音节/长句上下文感知更新)
     // 单音节已在 Phase 1 同步处理，这里重点处理多音节和上下文感知重排
     if state.ai.ai_first && state.ai.is_available() {
         let raw_clone = raw.clone();
         let dict_clone = dict_after;
-        let hwnd_raw = state.cand_win.hwnd().0 as isize;
         let ai_top_k = std::cmp::min(state.cfg.ai.top_k, 9);
+        
+        let hwnd_raw = if let Some(cw) = &state.cand_win {
+            cw.hwnd().0 as isize
+        } else {
+            0
+        };
 
         state.ai_generation += 1;
         let gen = state.ai_generation;
 
-        std::thread::spawn(move || {
-            let state_ptr = GLOBAL_STATE;
-            if state_ptr.is_null() { return; }
-            let state = &mut *state_ptr;
+        // 给 AI 推理线程设置足够大的栈空间 (ONNX Runtime beam search 资源开销大)
+        let _ = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024) // 8 MB
+            .spawn(move || {
+                let state_ptr = GLOBAL_STATE;
+                if state_ptr.is_null() { return; }
+                let state = &mut *state_ptr;
 
-            let ai_scored = state.ai.predict(
-                &raw_clone, &state.history, ai_top_k, &dict_clone,
-            );
+                let ctx = state.history.context_string();
+                let ai_scored = state.ai.predict(
+                    &raw_clone, &ctx, ai_top_k, &dict_clone,
+                );
 
-            if state.ai_generation != gen { return; }
 
-            // 改动1: 合并顺序 = 用户词 → AI词 → 字典词
-            let mut merged = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+                if state.ai_generation != gen { return; }
 
-            // 用户学习词
-            let learned = state.user_dict.get_learned_words(&raw_clone);
-            for (word, _) in &learned {
-                if seen.insert(word.clone()) { merged.push(word.clone()); }
-            }
-            // AI 词（排在字典前面）
-            for w in &ai_scored {
-                if seen.insert(w.clone()) { merged.push(w.clone()); }
-            }
-            // 字典词补充（不限数量，供翻页使用）
-            for w in &dict_clone {
-                if seen.insert(w.clone()) { merged.push(w.clone()); }
-            }
+                let mut merged = Vec::new();
+                let mut seen = std::collections::HashSet::new();
 
-            AI_RESULT = Some((gen, raw_clone, merged));
-            let hwnd = HWND(hwnd_raw as *mut _);
-            let _ = PostMessageW(hwnd, WM_AI_RESULT, WPARAM(0), LPARAM(0));
-        });
+                let learned = state.user_dict.get_learned_words(&raw_clone);
+                for (word, _) in &learned {
+                    if seen.insert(word.clone()) { merged.push(word.clone()); }
+                }
+                for w in &ai_scored {
+                    if seen.insert(w.clone()) { merged.push(w.clone()); }
+                }
+                for w in &dict_clone {
+                    if seen.insert(w.clone()) { merged.push(w.clone()); }
+                }
+
+                if let Some(cw) = &state.cand_win {
+                    state.all_candidates = merged;
+                    state.page_offset = 0;
+                    let raw_string = raw_clone;
+                    let refs: Vec<&str> = state.all_candidates.iter().take(PAGE_SIZE).map(|s| s.as_str()).collect();
+                    let page_info = if state.all_candidates.len() > PAGE_SIZE {
+                        Some((1, (state.all_candidates.len() + PAGE_SIZE - 1) / PAGE_SIZE))
+                    } else {
+                        None
+                    };
+                    cw.update_candidates_with_page(&raw_string, &refs, page_info);
+                    if state.input.engine.is_empty() {
+                        let pt = get_caret_screen_pos();
+                        cw.show(pt.x, pt.y + 4);
+                    }
+                }
+            });
     }
 
     eprintln!("[IME] pinyin={:?}  cands={}  mode={}",

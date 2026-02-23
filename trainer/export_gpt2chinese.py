@@ -48,8 +48,8 @@ class SimpleGPT2(torch.nn.Module):
 wrapper = SimpleGPT2(model)
 wrapper.eval()
 
-onnx_fp32 = os.path.join(OUT, 'weights_fp32.onnx')
-onnx_int8 = os.path.join(OUT, 'weights.onnx')
+onnx_fp32 = os.path.join(OUT, 'gpt2_int8_fp32_tmp.onnx')
+onnx_int8 = os.path.join(OUT, 'gpt2_int8.onnx')
 
 dummy = torch.randint(0, len(vocab), (1, 16))
 
@@ -128,4 +128,11 @@ for ctx, py, expected in test_cases:
 print(f"\n准确率: {ok}/{len(test_cases)}")
 
 os.remove(onnx_fp32)
+
+# 同时复制到项目根目录（cargo run 工作目录）
+ROOT = os.path.dirname(os.path.dirname(__file__))
+root_copy = os.path.join(ROOT, 'gpt2_int8.onnx')
+import shutil
+shutil.copy2(onnx_int8, root_copy)
 print(f"\n✅ 完成! {onnx_int8} ({int8_mb:.1f}MB)")
+print(f"✅ 已复制到根目录: {root_copy}")

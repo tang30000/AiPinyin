@@ -6,13 +6,20 @@
 mode = "ai"
 
 [ai]
-# AI 候选占位数 (AI主导模式下, 前N位给AI, 剩余给字典)
-top_k = 5
-# AI 是否参与字典候选排序 (true/false)
+# AI 候选占位数
+top_k = 9
+# AI 是否参与字典候选排序
 rerank = true
-# 上屏后自动联想下一词 (true=开启, false=关闭, 默认关闭)
-# 注意: 当前模型（拼音Concat模型）不擅长这一任务, 预测质量较差, 建议关闭
-predict_next = false
+# AI 服务地址（空 = 使用本地内嵌服务，端口自动分配）
+# 可填任意 OpenAI 兼容接口，如:
+#   http://localhost:11434/v1   (Ollama)
+#   https://api.openai.com/v1  (ChatGPT)
+endpoint = ""
+# 外部 AI 服务 API Key（本地服务留空）
+api_key = ""
+# 系统提示词（空 = 使用内置默认中文提示词）
+system_prompt = ""
+
 
 [ui]
 # 候选窗口字体大小

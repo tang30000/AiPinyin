@@ -217,8 +217,8 @@ impl AIPredictor {
                 Err(e) => { eprintln!("[AI] ⚠ {}", e); AIState::Unavailable(e) }
             },
             None => {
-                eprintln!("[AI] ℹ weights.onnx not found, dict-only");
-                AIState::Unavailable("weights.onnx not found".into())
+                eprintln!("[AI] ℹ gpt2_int8.onnx not found, dict-only");
+                AIState::Unavailable("gpt2_int8.onnx not found".into())
             }
         };
 
@@ -234,7 +234,7 @@ impl AIPredictor {
 
     /// AI 主导: 字典引导的上下文感知预测
     pub fn predict(
-        &mut self, pinyin: &str, context: &HistoryBuffer, top_k: usize,
+        &mut self, pinyin: &str, context: &str, top_k: usize,
         dict_words: &[String],
     ) -> Vec<String> {
         let session = match &mut self.state {
@@ -243,8 +243,7 @@ impl AIPredictor {
         let vocab = match &self.vocab {
             Some(v) => v, None => return vec![],
         };
-        let ctx_str = context.context_string();
-        match run_predict(session, vocab, pinyin, top_k, &ctx_str, dict_words) {
+        match run_predict(session, vocab, pinyin, top_k, context, dict_words) {
             Ok(c) => c,
             Err(e) => { eprintln!("[AI] predict: {}", e); vec![] }
         }
@@ -252,7 +251,7 @@ impl AIPredictor {
 
     /// 字典辅助: 上下文感知重排
     pub fn rerank(
-        &mut self, pinyin: &str, candidates: Vec<String>, context: &HistoryBuffer,
+        &mut self, pinyin: &str, candidates: Vec<String>, context: &str,
     ) -> Vec<String> {
         let session = match &mut self.state {
             AIState::Ready(s) => s, _ => return candidates,
@@ -260,8 +259,7 @@ impl AIPredictor {
         let vocab = match &self.vocab {
             Some(v) => v, None => return candidates,
         };
-        let ctx_str = context.context_string();
-        match run_rerank(session, vocab, pinyin, &candidates, &ctx_str) {
+        match run_rerank(session, vocab, pinyin, &candidates, context) {
             Ok(r) => r,
             Err(e) => { eprintln!("[AI] rerank: {}", e); candidates }
         }
@@ -272,25 +270,34 @@ impl AIPredictor {
 // ONNX 推理
 // ============================================================
 
-/// 运行推理: input_ids → logits
+/// 运行推理: input_ids → 最后 token 的 logits (GPT2-Chinese 纯字符模式)
+///
+/// 输入: [CLS] char1 char2 ... (全部字符 token)
+/// 输出: vocab_size 维向量，对应下一个字的概率分布
 fn run_inference(
     session: &mut ort::session::Session,
     input_ids: &[i64],
 ) -> Result<Vec<f32>, String> {
     let seq_len = input_ids.len();
 
-    let ids_tensor = ort::value::Tensor::from_array(
+    let input_tensor = ort::value::Tensor::from_array(
         ([1usize, seq_len], input_ids.to_vec())
-    ).map_err(|e| format!("ids tensor: {}", e))?;
+    ).map_err(|e| format!("input_ids tensor: {}", e))?;
 
-    let outputs = session.run(ort::inputs![ids_tensor])
-        .map_err(|e| format!("session.run: {}", e))?;
+    let outputs = session.run(ort::inputs![
+        "input_ids" => input_tensor
+    ]).map_err(|e| format!("session.run: {}", e))?;
 
-    let (_shape, logits) = outputs[0]
+    // 输出形状: [1, seq_len, vocab_size]，取最后一个 token 的 logits
+    let (shape, logits_raw) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("extract: {}", e))?;
 
-    Ok(logits.to_vec())
+    let vocab_size = shape[2] as usize;
+    let last_pos_offset = (seq_len - 1) * vocab_size;
+    let last_logits = logits_raw[last_pos_offset..last_pos_offset + vocab_size].to_vec();
+
+    Ok(last_logits)
 }
 
 /// 构建上下文前缀: [CLS] char1 char2 ... (纯字符序列)
@@ -330,12 +337,11 @@ fn run_predict(
         if is_abbrev {
             let initials = parse_initials(pinyin);
             let ctx_prefix = build_context(vocab, context);
-            let vocab_size = 21128usize;
             eprintln!("[AI] 首字母beam: initials={:?}, dict_words={}", initials, dict_words.len());
             
             // AI beam search: 逐字生成, 用声母约束
             let beam_results = abbreviation_beam_search(
-                session, vocab, &initials, &ctx_prefix, vocab_size, 5,
+                session, vocab, &initials, &ctx_prefix, 5,
             )?;
             
             // === 缩写词图: 把首字母拆成词段匹配字典 ===
@@ -367,20 +373,30 @@ fn run_predict(
             for word in &all_cands[..score_cap] {
                 let chars: Vec<char> = word.chars().collect();
                 let score_len = std::cmp::min(3, chars.len()); // 最多看前3字
-                let mut ids = ctx_prefix.clone();
+                
+                // GPT2-Chinese 评分: 逐字步进，每步把已生成字符拼到ctx_prefix后推理
                 let mut total = 0.0f32;
+                let mut current_ctx = ctx_prefix.clone();
                 let mut valid = true;
-                for ch in &chars[..score_len] {
+
+                for ch in chars.iter().take(score_len) {
                     let ch_str = ch.to_string();
                     let ch_id = match vocab.char2id.get(&ch_str) {
                         Some(&id) => id,
                         None => { valid = false; break; }
                     };
-                    let logits = run_inference(session, &ids)?;
-                    let offset = (ids.len() - 1) * vocab_size;
-                    if offset + ch_id as usize >= logits.len() { valid = false; break; }
-                    total += logits[offset + ch_id as usize];
-                    ids.push(ch_id);
+
+                    // 用当前上下文推理，取 ch_id 对应的 logit 分数
+                    let logits = match run_inference(session, &current_ctx) {
+                        Ok(l) => l,
+                        Err(_) => { valid = false; break; }
+                    };
+
+                    if ch_id as usize >= logits.len() { valid = false; break; }
+                    total += logits[ch_id as usize];
+
+                    // 把已预测的字符追加到上下文中
+                    current_ctx.push(ch_id);
                 }
                 if valid { scored.push((word.clone(), total)); }
             }
@@ -394,7 +410,6 @@ fn run_predict(
         return Ok(vec![]);
     }
 
-    let vocab_size = 21128usize;
     let ctx_prefix = build_context(vocab, context);
     let ctx_len = ctx_prefix.len() - 1;
 
@@ -406,9 +421,7 @@ fn run_predict(
     // === 单音节: 直接约束解码 ===
     if syllables.len() == 1 {
         let logits = run_inference(session, &ctx_prefix)?;
-        let offset = (ctx_prefix.len() - 1) * vocab_size;
-        if offset + vocab_size > logits.len() { return Err("logits too short".into()); }
-        let chars = get_top_k_constrained(&logits[offset..offset + vocab_size], vocab, &syllables[0], top_k);
+        let chars = get_top_k_constrained(&logits, vocab, &syllables[0], top_k);
         return Ok(chars.into_iter().map(|(_, ch)| ch).collect());
     }
 
@@ -418,7 +431,7 @@ fn run_predict(
     // Beam Search 输出已按累计 AI 分排好序，直接使用即可。
     if syllables.len() >= 2 {
         // AI Beam Search: 已按 AI 分从高到低排列
-        let beam_results = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, vocab_size, top_k)
+        let beam_results = run_predict_greedy(session, vocab, &syllables, &ctx_prefix, top_k)
             .unwrap_or_default();
 
         // 词图分词：字典多词覆盖（纯查表，O(1)，无推理开销）
@@ -463,7 +476,6 @@ fn run_predict_greedy(
     vocab: &VocabIndex,
     syllables: &[String],
     ctx_prefix: &[i64],
-    vocab_size: usize,
     beam_width: usize,
 ) -> Result<Vec<String>, String> {
     if syllables.is_empty() { return Ok(vec![]); }
@@ -476,24 +488,24 @@ fn run_predict_greedy(
     for syl in syllables {
         let mut next_beams: Vec<(String, Vec<i64>, f32)> = Vec::new();
 
-        for (text, ids, score) in &beams {
-            let logits = run_inference(session, ids)?;
-            let offset = (ids.len() - 1) * vocab_size;
-            if offset + vocab_size > logits.len() { continue; }
+        for (text, current_ctx_ids, score) in &beams {
+            let logits = run_inference(session, current_ctx_ids)?;
 
             // 对当前 beam 用拼音约束取 top-k 个字
             let top_chars = get_top_k_constrained(
-                &logits[offset..offset + vocab_size], vocab, syl, beam_width,
+                &logits, vocab, syl, beam_width,
             );
 
             for (char_id, ch) in top_chars {
                 // 从 logits 中取该字的原始分数累加
-                let char_score = logits.get(offset + char_id as usize).copied().unwrap_or(-50.0);
-                let mut new_ids = ids.clone();
-                new_ids.push(char_id);
+                let char_score = logits.get(char_id as usize).copied().unwrap_or(-50.0);
                 let mut new_text = text.clone();
                 new_text.push_str(&ch);
-                next_beams.push((new_text, new_ids, score + char_score));
+                let mut new_ctx_ids = current_ctx_ids.clone();
+                if let Some(&id) = vocab.char2id.get(&ch) {
+                    new_ctx_ids.push(id);
+                }
+                next_beams.push((new_text, new_ctx_ids, score + char_score));
             }
         }
 
@@ -595,24 +607,22 @@ fn run_rerank(
         return Ok(candidates.to_vec());
     }
 
-    let vocab_size = 21128usize;
     let n = candidates.len();
 
     // 构建纯字符上下文
     let input_ids = build_context(vocab, context);
     let ctx_len = input_ids.len() - 1;
 
-    // 直接推理 (不加拼音 token)
+    // 直接推理 (GPT2-Chinese: 返回最后位置logits)
     let logits = run_inference(session, &input_ids)?;
-    let offset = (input_ids.len() - 1) * vocab_size;
 
-    // 提取每个候选首字的 AI 分数
+    // 提取每个候选首字的 AI 分数 (logits 已是最后位置的 vocab_size 向量)
     let ai_scores: Vec<f32> = candidates.iter().map(|cand| {
         cand.chars().next()
             .and_then(|ch| vocab.char2id.get(&ch.to_string()))
             .and_then(|&cid| {
-                let pos = offset + cid as usize;
-                if pos < logits.len() { Some(logits[pos]) } else { None }
+                let idx = cid as usize;
+                if idx < logits.len() { Some(logits[idx]) } else { None }
             })
             .unwrap_or(-50.0)
     }).collect();
@@ -681,10 +691,10 @@ fn find_model_path() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe()
         .ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
     if let Some(dir) = &exe_dir {
-        let p = dir.join("weights.onnx");
+        let p = dir.join("gpt2_int8.onnx");
         if p.exists() { return Some(p); }
     }
-    let p = PathBuf::from("weights.onnx");
+    let p = PathBuf::from("gpt2_int8.onnx");
     if p.exists() { Some(p) } else { None }
 }
 
@@ -842,7 +852,6 @@ fn abbreviation_beam_search(
     vocab: &VocabIndex,
     initials: &[String],
     ctx_prefix: &[i64],
-    vocab_size: usize,
     beam_width: usize,
 ) -> Result<Vec<String>, String> {
     if initials.is_empty() { return Ok(vec![]); }
@@ -872,14 +881,13 @@ fn abbreviation_beam_search(
         let mut new_beams: Vec<(String, Vec<i64>, f32)> = Vec::new();
 
         for (text, ids, score) in &beams {
+            // GPT2-Chinese: run_inference 已返回最后位置的 logits 向量
             let logits = run_inference(session, ids)?;
-            let offset = (ids.len() - 1) * vocab_size;
-            if offset + vocab_size > logits.len() { continue; }
 
             // 在该声母对应的字中取 top-beam_width
             let mut char_scores: Vec<(i64, f32)> = candidate_ids.iter()
                 .filter_map(|&cid| {
-                    let idx = offset + cid as usize;
+                    let idx = cid as usize;
                     if idx < logits.len() { Some((cid, logits[idx])) } else { None }
                 })
                 .collect();

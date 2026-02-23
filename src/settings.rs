@@ -14,7 +14,7 @@ fn exe_dir() -> PathBuf {
 }
 
 /// 读取当前配置和样式，返回 JSON 字符串
-fn load_config_json() -> String {
+pub fn load_config_json() -> String {
     let dir = exe_dir();
 
     // 读 config.toml
@@ -105,7 +105,7 @@ fn load_config_json() -> String {
 }
 
 /// 保存 config.toml
-fn save_config(data: &serde_json::Value) {
+pub fn save_config(data: &serde_json::Value) {
     let dir = exe_dir();
     let config = &data["config"];
 
@@ -142,7 +142,7 @@ extra = [{}]
 }
 
 /// 保存 style.css
-fn save_style(data: &serde_json::Value) {
+pub fn save_style(data: &serde_json::Value) {
     let dir = exe_dir();
     let s = &data["style"];
 
@@ -181,7 +181,7 @@ r#"/* AiPinyin 候选词窗口样式表
 }
 
 /// 删除插件文件
-fn delete_plugin(name: &str) {
+pub fn delete_plugin(name: &str) {
     let path = exe_dir().join("plugins").join(name);
     if path.exists() {
         let _ = std::fs::remove_file(&path);
@@ -190,7 +190,7 @@ fn delete_plugin(name: &str) {
 }
 
 /// 切换插件启用状态
-fn toggle_plugin(name: &str, enabled: bool) {
+pub fn toggle_plugin(name: &str, enabled: bool) {
     let dir = exe_dir().join("plugins");
     let auth_path = dir.join(".authorized");
     let mut lines: Vec<String> = std::fs::read_to_string(&auth_path)
@@ -206,84 +206,4 @@ fn toggle_plugin(name: &str, enabled: bool) {
     eprintln!("[Settings] {} 插件: {} = {}", if enabled { "✅" } else { "❌" }, name, enabled);
 }
 
-/// 在新线程中打开设置窗口
-pub fn open_settings() {
-    std::thread::spawn(|| {
-        if let Err(e) = open_settings_inner() {
-            eprintln!("[Settings] ❌ 打开设置窗口失败: {}", e);
-        }
-    });
-}
-
-fn open_settings_inner() -> Result<(), Box<dyn std::error::Error>> {
-    use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tao::platform::windows::EventLoopBuilderExtWindows;
-    use tao::platform::run_return::EventLoopExtRunReturn;
-    use tao::window::WindowBuilder;
-    use wry::WebViewBuilder;
-
-    let mut event_loop = EventLoopBuilder::new().with_any_thread(true).build();
-    let window = WindowBuilder::new()
-        .with_title("AiPinyin 设置")
-        .with_inner_size(tao::dpi::LogicalSize::new(520.0, 720.0))
-        .with_resizable(true)
-        .build(&event_loop)?;
-
-    // 加载 HTML 并注入配置数据
-    let html_path = exe_dir().join("settings.html");
-    let mut html_content = std::fs::read_to_string(&html_path)
-        .unwrap_or_else(|_| "<h1>找不到 settings.html</h1>".into());
-
-    // 在 </body> 前注入初始化脚本
-    let config_json = load_config_json();
-    let init_script = format!(
-        "\n<script>window.__INIT_CONFIG__ = {};</script>\n",
-        config_json
-    );
-    html_content = html_content.replace("</body>", &format!("{}</body>", init_script));
-
-    let webview = WebViewBuilder::new()
-        .with_html(&html_content)
-        .with_ipc_handler(move |msg| {
-            let body = msg.body();
-            match serde_json::from_str::<serde_json::Value>(body) {
-                Ok(data) => {
-                    let action = data["action"].as_str().unwrap_or("");
-                    match action {
-                        "save" => {
-                            save_config(&data);
-                            save_style(&data);
-                        }
-                        "toggle_plugin" => {
-                            if let Some(name) = data["name"].as_str() {
-                                let enabled = data["enabled"].as_bool().unwrap_or(false);
-                                toggle_plugin(name, enabled);
-                            }
-                        }
-                        "delete_plugin" => {
-                            if let Some(name) = data["name"].as_str() {
-                                delete_plugin(name);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => eprintln!("[Settings] IPC parse error: {}", e),
-            }
-        })
-        .build(&window)?;
-
-    // 防止 webview 被 drop
-    let _webview = webview;
-
-    event_loop.run_return(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
-            *control_flow = ControlFlow::Exit;
-        }
-    });
-
-    eprintln!("[Settings] 设置窗口已关闭");
-    Ok(())
-}
+// The separate settings window has been replaced by the unified WebView2 frontend.

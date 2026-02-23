@@ -36,7 +36,8 @@ node_modules/
 *.o
 *.obj
 
-# Model weights (too large for git)
+# Model weights — hosted on Hugging Face (tang30000/AiPinyin-gpt2chinese)
+# https://huggingface.co/tang30000/AiPinyin-gpt2chinese
 *.onnx
 *.onnx.data
 *.bin
